@@ -6,9 +6,14 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
-const openAICompatible = "openai-compatible"
+const (
+	defaultConfigFile = "config.yaml"
+	openAICompatible  = "openai-compatible"
+)
 
 type Config struct {
 	HTTPAddr        string
@@ -24,24 +29,49 @@ type ModelConfig struct {
 	Timeout  time.Duration
 }
 
+type fileConfig struct {
+	HTTPAddr        string `yaml:"HTTP_ADDR"`
+	ShutdownTimeout string `yaml:"SHUTDOWN_TIMEOUT"`
+	ModelProvider   string `yaml:"MODEL_PROVIDER"`
+	ModelBaseURL    string `yaml:"MODEL_BASE_URL"`
+	ModelName       string `yaml:"MODEL_NAME"`
+	ModelAPIKey     string `yaml:"MODEL_API_KEY"`
+	ModelTimeout    string `yaml:"MODEL_TIMEOUT"`
+}
+
 func Load() (Config, error) {
-	modelTimeout, err := durationEnv("MODEL_TIMEOUT", 60*time.Second)
+	path, explicitlyConfigured := os.LookupEnv("CONFIG_FILE")
+	path = strings.TrimSpace(path)
+	if path == "" {
+		path = defaultConfigFile
+		explicitlyConfigured = false
+	}
+
+	raw := defaultFileConfig()
+	if err := readYAML(path, &raw); err != nil {
+		if explicitlyConfigured || !errors.Is(err, os.ErrNotExist) {
+			return Config{}, err
+		}
+	}
+	applyEnvironment(&raw)
+
+	modelTimeout, err := parseDuration("MODEL_TIMEOUT", raw.ModelTimeout)
 	if err != nil {
 		return Config{}, err
 	}
-	shutdownTimeout, err := durationEnv("SHUTDOWN_TIMEOUT", 10*time.Second)
+	shutdownTimeout, err := parseDuration("SHUTDOWN_TIMEOUT", raw.ShutdownTimeout)
 	if err != nil {
 		return Config{}, err
 	}
 
 	cfg := Config{
-		HTTPAddr:        valueOrDefault("HTTP_ADDR", ":8080"),
+		HTTPAddr:        strings.TrimSpace(raw.HTTPAddr),
 		ShutdownTimeout: shutdownTimeout,
 		Model: ModelConfig{
-			Provider: valueOrDefault("MODEL_PROVIDER", openAICompatible),
-			BaseURL:  valueOrDefault("MODEL_BASE_URL", "https://api.openai.com/v1"),
-			Name:     strings.TrimSpace(os.Getenv("MODEL_NAME")),
-			APIKey:   strings.TrimSpace(os.Getenv("MODEL_API_KEY")),
+			Provider: strings.TrimSpace(raw.ModelProvider),
+			BaseURL:  strings.TrimSpace(raw.ModelBaseURL),
+			Name:     strings.TrimSpace(raw.ModelName),
+			APIKey:   strings.TrimSpace(raw.ModelAPIKey),
 			Timeout:  modelTimeout,
 		},
 	}
@@ -53,13 +83,13 @@ func Load() (Config, error) {
 
 func (c Config) Validate() error {
 	var missing []string
-	if strings.TrimSpace(c.HTTPAddr) == "" {
+	if c.HTTPAddr == "" {
 		missing = append(missing, "HTTP_ADDR")
 	}
-	if strings.TrimSpace(c.Model.Name) == "" {
+	if c.Model.Name == "" {
 		missing = append(missing, "MODEL_NAME")
 	}
-	if strings.TrimSpace(c.Model.APIKey) == "" {
+	if c.Model.APIKey == "" {
 		missing = append(missing, "MODEL_API_KEY")
 	}
 	if len(missing) > 0 {
@@ -77,21 +107,50 @@ func (c Config) Validate() error {
 	return nil
 }
 
-func durationEnv(key string, fallback time.Duration) (time.Duration, error) {
-	raw := strings.TrimSpace(os.Getenv(key))
-	if raw == "" {
-		return fallback, nil
+func defaultFileConfig() fileConfig {
+	return fileConfig{
+		HTTPAddr:        ":8080",
+		ShutdownTimeout: "10s",
+		ModelProvider:   openAICompatible,
+		ModelBaseURL:    "https://api.openai.com/v1",
+		ModelTimeout:    "60s",
 	}
-	d, err := time.ParseDuration(raw)
+}
+
+func readYAML(path string, target *fileConfig) error {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read config file %q: %w", path, err)
+	}
+	decoder := yaml.NewDecoder(strings.NewReader(string(content)))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(target); err != nil {
+		return fmt.Errorf("decode config file %q: %w", path, err)
+	}
+	return nil
+}
+
+func applyEnvironment(raw *fileConfig) {
+	overrides := map[string]*string{
+		"HTTP_ADDR":        &raw.HTTPAddr,
+		"SHUTDOWN_TIMEOUT": &raw.ShutdownTimeout,
+		"MODEL_PROVIDER":   &raw.ModelProvider,
+		"MODEL_BASE_URL":   &raw.ModelBaseURL,
+		"MODEL_NAME":       &raw.ModelName,
+		"MODEL_API_KEY":    &raw.ModelAPIKey,
+		"MODEL_TIMEOUT":    &raw.ModelTimeout,
+	}
+	for key, target := range overrides {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			*target = value
+		}
+	}
+}
+
+func parseDuration(key, raw string) (time.Duration, error) {
+	d, err := time.ParseDuration(strings.TrimSpace(raw))
 	if err != nil {
 		return 0, fmt.Errorf("parse %s: %w", key, err)
 	}
 	return d, nil
-}
-
-func valueOrDefault(key, fallback string) string {
-	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
-		return value
-	}
-	return fallback
 }

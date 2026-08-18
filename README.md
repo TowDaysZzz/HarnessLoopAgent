@@ -11,16 +11,16 @@ The repository currently contains only the Phase 1 bootstrap: an Eino `ChatModel
 - Go 1.25+
 - An OpenAI-compatible chat model that supports tool calling
 
-## Run locally
+## Configure and run locally
 
-Set the values shown in `.env.example`, then run:
+Create the local configuration file and fill in `MODEL_NAME` and `MODEL_API_KEY`:
 
 ```bash
-export MODEL_NAME=your-model
-export MODEL_API_KEY=your-key
-export MODEL_BASE_URL=https://api.openai.com/v1
+cp config.example.yaml config.yaml
 go run ./cmd/note-agent-server
 ```
+
+`config.yaml` is ignored by Git and excluded from Docker builds because it can contain a secret. Set `CONFIG_FILE` to use another YAML file. Environment variables with the same names override YAML values, which is useful for containers and secret managers.
 
 Check the process:
 
