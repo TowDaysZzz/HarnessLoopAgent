@@ -2,18 +2,40 @@ package httpserver
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
+
+	"github.com/TowDaysZzz/HarnessLoopAgent/internal/chat"
 )
 
 type Server struct {
 	hertz *server.Hertz
 }
 
-func New(addr string, ready func() bool) *Server {
+type Option func(*serverOptions)
+
+type serverOptions struct {
+	chat *chat.Service
+}
+
+func WithChatService(service *chat.Service) Option {
+	return func(options *serverOptions) { options.chat = service }
+}
+
+func New(addr string, ready func() bool, options ...Option) *Server {
+	var configured serverOptions
+	for _, option := range options {
+		option(&configured)
+	}
 	h := server.Default(
 		server.WithHostPorts(addr),
 		server.WithHandleMethodNotAllowed(true),
@@ -22,6 +44,9 @@ func New(addr string, ready func() bool) *Server {
 	h.GET("/healthz", func(ctx context.Context, c *app.RequestContext) {
 		c.JSON(consts.StatusOK, map[string]string{"status": "ok"})
 	})
+	if configured.chat != nil {
+		registerChatRoutes(h, configured.chat)
+	}
 	h.GET("/readyz", func(ctx context.Context, c *app.RequestContext) {
 		if !ready() {
 			c.JSON(consts.StatusServiceUnavailable, map[string]string{"status": "not_ready"})
@@ -31,6 +56,195 @@ func New(addr string, ready func() bool) *Server {
 	})
 
 	return &Server{hertz: h}
+}
+
+func registerChatRoutes(h *server.Hertz, service *chat.Service) {
+	h.POST("/v1/sessions", func(ctx context.Context, c *app.RequestContext) {
+		var request struct {
+			Title string `json:"title"`
+		}
+		if len(c.Request.Body()) > 0 {
+			if err := json.Unmarshal(c.Request.Body(), &request); err != nil {
+				writeError(c, consts.StatusBadRequest, "invalid_json", "请求体必须是合法 JSON")
+				return
+			}
+		}
+		session, err := service.CreateSession(ctx, request.Title)
+		if err != nil {
+			writeServiceError(c, err)
+			return
+		}
+		c.JSON(consts.StatusCreated, session)
+	})
+
+	h.GET("/v1/sessions/:session_id", func(ctx context.Context, c *app.RequestContext) {
+		session, err := service.GetSession(ctx, c.Param("session_id"))
+		if err != nil {
+			writeServiceError(c, err)
+			return
+		}
+		c.JSON(consts.StatusOK, session)
+	})
+
+	h.GET("/v1/sessions/:session_id/messages", func(ctx context.Context, c *app.RequestContext) {
+		limit := parsePositiveInt(string(c.Query("limit")), 100)
+		messages, err := service.ListMessages(ctx, c.Param("session_id"), limit)
+		if err != nil {
+			writeServiceError(c, err)
+			return
+		}
+		c.JSON(consts.StatusOK, map[string]any{"items": messages})
+	})
+
+	h.POST("/v1/sessions/:session_id/runs", func(ctx context.Context, c *app.RequestContext) {
+		var request struct {
+			Message string `json:"message"`
+			Model   string `json:"model"`
+		}
+		if err := json.Unmarshal(c.Request.Body(), &request); err != nil {
+			writeError(c, consts.StatusBadRequest, "invalid_json", "请求体必须是合法 JSON")
+			return
+		}
+		created, err := service.CreateRun(ctx, chat.CreateRunInput{
+			SessionID: c.Param("session_id"), Content: request.Message, Model: request.Model,
+			IdempotencyKey: string(c.GetHeader("Idempotency-Key")),
+		})
+		if err != nil {
+			writeServiceError(c, err)
+			return
+		}
+		status := consts.StatusAccepted
+		if !created.Created {
+			status = consts.StatusOK
+		}
+		c.JSON(status, map[string]any{
+			"run":               created.Run,
+			"events_url":        "/v1/runs/" + created.Run.ID + "/events",
+			"idempotent_replay": !created.Created,
+		})
+	})
+
+	h.GET("/v1/runs/:run_id", func(ctx context.Context, c *app.RequestContext) {
+		run, err := service.GetRun(ctx, c.Param("run_id"))
+		if err != nil {
+			writeServiceError(c, err)
+			return
+		}
+		c.JSON(consts.StatusOK, run)
+	})
+
+	h.POST("/v1/runs/:run_id/cancel", func(ctx context.Context, c *app.RequestContext) {
+		run, err := service.CancelRun(ctx, c.Param("run_id"))
+		if err != nil {
+			writeServiceError(c, err)
+			return
+		}
+		c.JSON(consts.StatusOK, run)
+	})
+
+	h.GET("/v1/runs/:run_id/events", func(ctx context.Context, c *app.RequestContext) {
+		runID := c.Param("run_id")
+		if _, err := service.GetRun(ctx, runID); err != nil {
+			writeServiceError(c, err)
+			return
+		}
+		after, err := parseLastEventID(string(c.GetHeader("Last-Event-ID")))
+		if err != nil {
+			writeError(c, consts.StatusBadRequest, "invalid_last_event_id", err.Error())
+			return
+		}
+		reader, writer := io.Pipe()
+		c.Response.Header.SetContentTypeBytes([]byte("text/event-stream; charset=utf-8"))
+		c.Response.Header.Set("Cache-Control", "no-cache")
+		c.Response.Header.Set("X-Accel-Buffering", "no")
+		c.Response.SetBodyStream(reader, -1)
+		go streamEvents(ctx, writer, service, runID, after)
+	})
+}
+
+func streamEvents(ctx context.Context, writer *io.PipeWriter, service *chat.Service, runID string, after int64) {
+	defer writer.Close()
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+	for {
+		wake, unsubscribe := service.Subscribe(runID)
+		events, err := service.ListEvents(ctx, runID, after, 100)
+		if err != nil {
+			unsubscribe()
+			return
+		}
+		for _, event := range events {
+			if err := writeSSE(writer, event); err != nil {
+				unsubscribe()
+				return
+			}
+			after = event.Sequence
+		}
+		run, err := service.GetRun(ctx, runID)
+		if err != nil || run.Status.Terminal() {
+			unsubscribe()
+			return
+		}
+		select {
+		case <-ctx.Done():
+			unsubscribe()
+			return
+		case <-wake:
+		case <-heartbeat.C:
+			unsubscribe()
+			if _, err := io.WriteString(writer, ": keep-alive\n\n"); err != nil {
+				return
+			}
+		}
+	}
+}
+
+func writeSSE(writer io.Writer, event chat.Event) error {
+	payload, err := json.Marshal(event.Data)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(writer, "id: %d\nevent: %s\ndata: %s\n\n", event.Sequence, event.Type, payload)
+	return err
+}
+
+func parseLastEventID(raw string) (int64, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, nil
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || value < 0 {
+		return 0, errors.New("Last-Event-ID 必须是非负整数")
+	}
+	return value, nil
+}
+
+func parsePositiveInt(raw string, fallback int) int {
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 1 {
+		return fallback
+	}
+	return value
+}
+
+func writeServiceError(c *app.RequestContext, err error) {
+	switch {
+	case errors.Is(err, chat.ErrNotFound):
+		writeError(c, consts.StatusNotFound, "not_found", "资源不存在")
+	case errors.Is(err, chat.ErrActiveRun):
+		writeError(c, consts.StatusConflict, "active_run_exists", "当前会话已有正在执行的 Run")
+	case errors.Is(err, chat.ErrInvalidState):
+		writeError(c, consts.StatusConflict, "invalid_run_state", "Run 当前状态不允许该操作")
+	case errors.Is(err, chat.ErrInvalidInput):
+		writeError(c, consts.StatusBadRequest, "invalid_request", err.Error())
+	default:
+		writeError(c, consts.StatusInternalServerError, "internal_error", "服务内部错误")
+	}
+}
+
+func writeError(c *app.RequestContext, status int, code, message string) {
+	c.JSON(status, map[string]any{"error": map[string]string{"code": code, "message": message}})
 }
 
 func (s *Server) Run() error {

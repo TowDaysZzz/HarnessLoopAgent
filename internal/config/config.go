@@ -27,6 +27,8 @@ type Config struct {
 	Agent           AgentConfig
 	Resilience      ResilienceConfig
 	Grounding       GroundingConfig
+	Database        DatabaseConfig
+	Context         ContextConfig
 }
 
 type ModelConfig struct {
@@ -80,6 +82,21 @@ type GroundingConfig struct {
 	RejectPromptInjection   bool
 }
 
+type DatabaseConfig struct {
+	Enabled         bool
+	DSN             string
+	AutoMigrate     bool
+	MaxOpenConns    int
+	MaxIdleConns    int
+	ConnMaxLifetime time.Duration
+}
+
+type ContextConfig struct {
+	MaxInputTokens      int
+	MinRecentMessages   int
+	MessageHistoryLimit int
+}
+
 type LoadOptions struct {
 	Path  string
 	Model string
@@ -94,6 +111,8 @@ type fileConfig struct {
 	Agent           fileAgentConfig            `yaml:"AGENT"`
 	Resilience      fileResilienceConfig       `yaml:"RESILIENCE"`
 	Grounding       fileGroundingConfig        `yaml:"GROUNDING"`
+	Database        fileDatabaseConfig         `yaml:"DATABASE"`
+	Context         fileContextConfig          `yaml:"CONTEXT"`
 
 	// 保留原有单模型配置格式的兼容性。
 	ModelProvider string `yaml:"MODEL_PROVIDER"`
@@ -134,6 +153,21 @@ type fileGroundingConfig struct {
 	RequireCompleteCitation bool    `yaml:"REQUIRE_COMPLETE_CITATION"`
 	MaxContextChars         int     `yaml:"MAX_CONTEXT_CHARS"`
 	RejectPromptInjection   bool    `yaml:"REJECT_PROMPT_INJECTION"`
+}
+
+type fileDatabaseConfig struct {
+	Enabled         bool   `yaml:"ENABLED"`
+	DSN             string `yaml:"DSN"`
+	AutoMigrate     bool   `yaml:"AUTO_MIGRATE"`
+	MaxOpenConns    int    `yaml:"MAX_OPEN_CONNS"`
+	MaxIdleConns    int    `yaml:"MAX_IDLE_CONNS"`
+	ConnMaxLifetime string `yaml:"CONN_MAX_LIFETIME"`
+}
+
+type fileContextConfig struct {
+	MaxInputTokens      int `yaml:"MAX_INPUT_TOKENS"`
+	MinRecentMessages   int `yaml:"MIN_RECENT_MESSAGES"`
+	MessageHistoryLimit int `yaml:"MESSAGE_HISTORY_LIMIT"`
 }
 
 type fileRAGConfig struct {
@@ -213,6 +247,10 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	connMaxLifetime, err := parseDuration("DATABASE_CONN_MAX_LIFETIME", raw.Database.ConnMaxLifetime)
+	if err != nil {
+		return Config{}, err
+	}
 
 	cfg := Config{
 		HTTPAddr:        strings.TrimSpace(raw.HTTPAddr),
@@ -252,6 +290,14 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 			MinResults: raw.Grounding.MinResults, MinTopScore: raw.Grounding.MinTopScore, MinItemScore: raw.Grounding.MinItemScore,
 			RequireCompleteCitation: raw.Grounding.RequireCompleteCitation,
 			MaxContextChars:         raw.Grounding.MaxContextChars, RejectPromptInjection: raw.Grounding.RejectPromptInjection,
+		},
+		Database: DatabaseConfig{
+			Enabled: raw.Database.Enabled, DSN: strings.TrimSpace(raw.Database.DSN), AutoMigrate: raw.Database.AutoMigrate,
+			MaxOpenConns: raw.Database.MaxOpenConns, MaxIdleConns: raw.Database.MaxIdleConns, ConnMaxLifetime: connMaxLifetime,
+		},
+		Context: ContextConfig{
+			MaxInputTokens: raw.Context.MaxInputTokens, MinRecentMessages: raw.Context.MinRecentMessages,
+			MessageHistoryLimit: raw.Context.MessageHistoryLimit,
 		},
 	}
 	if err := cfg.Validate(); err != nil {
@@ -294,6 +340,29 @@ func (c Config) Validate() error {
 	}
 	if err := c.Grounding.Validate(); err != nil {
 		return err
+	}
+	if err := c.Database.Validate(); err != nil {
+		return err
+	}
+	if err := c.Context.Validate(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c DatabaseConfig) Validate() error {
+	if c.MaxOpenConns < 1 || c.MaxIdleConns < 0 || c.MaxIdleConns > c.MaxOpenConns || c.ConnMaxLifetime <= 0 {
+		return errors.New("DATABASE connection pool settings are invalid")
+	}
+	if c.Enabled && c.DSN == "" {
+		return errors.New("DATABASE_DSN is required when DATABASE is enabled")
+	}
+	return nil
+}
+
+func (c ContextConfig) Validate() error {
+	if c.MaxInputTokens < 1 || c.MinRecentMessages < 1 || c.MessageHistoryLimit < c.MinRecentMessages {
+		return errors.New("CONTEXT limits are invalid")
 	}
 	return nil
 }
@@ -388,6 +457,12 @@ func defaultFileConfig() fileConfig {
 			MinResults: 1, MinTopScore: 0.60, MinItemScore: 0.45,
 			RequireCompleteCitation: true, MaxContextChars: 24000, RejectPromptInjection: true,
 		},
+		Database: fileDatabaseConfig{
+			ConnMaxLifetime: "5m", MaxOpenConns: 20, MaxIdleConns: 10,
+		},
+		Context: fileContextConfig{
+			MaxInputTokens: 24000, MinRecentMessages: 6, MessageHistoryLimit: 100,
+		},
 	}
 }
 
@@ -457,16 +532,26 @@ func applyServiceEnvironment(raw *fileConfig) error {
 		"SHUTDOWN_TIMEOUT": &raw.ShutdownTimeout,
 	})
 	applyEnvironment(map[string]*string{
-		"RAG_BASE_URL":         &raw.RAG.BaseURL,
-		"RAG_API_KEY":          &raw.RAG.APIKey,
-		"RAG_TIMEOUT":          &raw.RAG.Timeout,
-		"RAG_STRATEGY_PROFILE": &raw.RAG.StrategyProfile,
-		"AGENT_RUN_TIMEOUT":    &raw.Agent.RunTimeout,
-		"AGENT_TOOL_TIMEOUT":   &raw.Agent.ToolTimeout,
-		"RETRY_BASE_DELAY":     &raw.Resilience.RetryBaseDelay,
-		"RETRY_MAX_DELAY":      &raw.Resilience.RetryMaxDelay,
-		"CIRCUIT_OPEN_TIMEOUT": &raw.Resilience.CircuitOpenTimeout,
+		"RAG_BASE_URL":               &raw.RAG.BaseURL,
+		"RAG_API_KEY":                &raw.RAG.APIKey,
+		"RAG_TIMEOUT":                &raw.RAG.Timeout,
+		"RAG_STRATEGY_PROFILE":       &raw.RAG.StrategyProfile,
+		"AGENT_RUN_TIMEOUT":          &raw.Agent.RunTimeout,
+		"AGENT_TOOL_TIMEOUT":         &raw.Agent.ToolTimeout,
+		"RETRY_BASE_DELAY":           &raw.Resilience.RetryBaseDelay,
+		"RETRY_MAX_DELAY":            &raw.Resilience.RetryMaxDelay,
+		"CIRCUIT_OPEN_TIMEOUT":       &raw.Resilience.CircuitOpenTimeout,
+		"DATABASE_DSN":               &raw.Database.DSN,
+		"DATABASE_CONN_MAX_LIFETIME": &raw.Database.ConnMaxLifetime,
 	})
+	for key, target := range map[string]*bool{
+		"DATABASE_ENABLED":      &raw.Database.Enabled,
+		"DATABASE_AUTO_MIGRATE": &raw.Database.AutoMigrate,
+	} {
+		if err := applyBoolEnvironment(key, target); err != nil {
+			return err
+		}
+	}
 	if value := strings.TrimSpace(os.Getenv("RAG_ENABLED")); value != "" {
 		enabled, err := strconv.ParseBool(value)
 		if err != nil {
@@ -489,18 +574,23 @@ func applyServiceEnvironment(raw *fileConfig) error {
 		raw.RAG.KBIDs = ids
 	}
 	for key, target := range map[string]*int{
-		"AGENT_MAX_ITERATIONS":        &raw.Agent.MaxIterations,
-		"AGENT_MAX_MODEL_CALLS":       &raw.Agent.MaxModelCalls,
-		"AGENT_MAX_TOOL_CALLS":        &raw.Agent.MaxToolCalls,
-		"AGENT_MAX_REPAIR_ATTEMPTS":   &raw.Agent.MaxRepairAttempts,
-		"AGENT_MAX_OUTPUT_TOKENS":     &raw.Agent.MaxOutputTokens,
-		"MODEL_MAX_ATTEMPTS":          &raw.Resilience.ModelMaxAttempts,
-		"RAG_MAX_ATTEMPTS":            &raw.Resilience.RAGMaxAttempts,
-		"MODEL_MAX_CONCURRENCY":       &raw.Resilience.ModelMaxConcurrency,
-		"RAG_MAX_CONCURRENCY":         &raw.Resilience.RAGMaxConcurrency,
-		"CIRCUIT_FAILURE_THRESHOLD":   &raw.Resilience.CircuitFailureThreshold,
-		"GROUNDING_MIN_RESULTS":       &raw.Grounding.MinResults,
-		"GROUNDING_MAX_CONTEXT_CHARS": &raw.Grounding.MaxContextChars,
+		"AGENT_MAX_ITERATIONS":          &raw.Agent.MaxIterations,
+		"AGENT_MAX_MODEL_CALLS":         &raw.Agent.MaxModelCalls,
+		"AGENT_MAX_TOOL_CALLS":          &raw.Agent.MaxToolCalls,
+		"AGENT_MAX_REPAIR_ATTEMPTS":     &raw.Agent.MaxRepairAttempts,
+		"AGENT_MAX_OUTPUT_TOKENS":       &raw.Agent.MaxOutputTokens,
+		"MODEL_MAX_ATTEMPTS":            &raw.Resilience.ModelMaxAttempts,
+		"RAG_MAX_ATTEMPTS":              &raw.Resilience.RAGMaxAttempts,
+		"MODEL_MAX_CONCURRENCY":         &raw.Resilience.ModelMaxConcurrency,
+		"RAG_MAX_CONCURRENCY":           &raw.Resilience.RAGMaxConcurrency,
+		"CIRCUIT_FAILURE_THRESHOLD":     &raw.Resilience.CircuitFailureThreshold,
+		"GROUNDING_MIN_RESULTS":         &raw.Grounding.MinResults,
+		"GROUNDING_MAX_CONTEXT_CHARS":   &raw.Grounding.MaxContextChars,
+		"DATABASE_MAX_OPEN_CONNS":       &raw.Database.MaxOpenConns,
+		"DATABASE_MAX_IDLE_CONNS":       &raw.Database.MaxIdleConns,
+		"CONTEXT_MAX_INPUT_TOKENS":      &raw.Context.MaxInputTokens,
+		"CONTEXT_MIN_RECENT_MESSAGES":   &raw.Context.MinRecentMessages,
+		"CONTEXT_MESSAGE_HISTORY_LIMIT": &raw.Context.MessageHistoryLimit,
 	} {
 		if err := applyIntEnvironment(key, target); err != nil {
 			return err

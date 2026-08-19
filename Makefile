@@ -1,4 +1,4 @@
-.PHONY: build run chat test test-race integration-rag vet check docker-build
+.PHONY: build run chat test test-race integration-rag integration-mysql vet check docker-build
 
 build:
 	go build -o bin/note-agent-server ./cmd/note-agent-server
@@ -22,6 +22,10 @@ integration-rag:
 	test -n "$(RAG_API_KEY)"
 	test -n "$(RAG_INTEGRATION_KB_ID)"
 	go test -v ./internal/ragclient -run TestIntegrationRetrieve
+
+integration-mysql:
+	test -n "$(MYSQL_INTEGRATION_DSN)"
+	go test -v ./internal/platform/mysqlstore -run TestIntegrationRepositoryLifecycle
 
 vet:
 	go vet ./...

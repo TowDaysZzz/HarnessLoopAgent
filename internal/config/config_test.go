@@ -252,6 +252,44 @@ GROUNDING:
 	}
 }
 
+func TestLoadDatabaseAndContextConfig(t *testing.T) {
+	clearOverrides(t)
+	path := writeConfig(t, `
+MODEL_NAME: test
+MODEL_API_KEY: key
+DATABASE:
+  ENABLED: true
+  DSN: user:pass@tcp(127.0.0.1:3306)/note_agent?parseTime=true
+  AUTO_MIGRATE: true
+  MAX_OPEN_CONNS: 12
+  MAX_IDLE_CONNS: 4
+  CONN_MAX_LIFETIME: 3m
+CONTEXT:
+  MAX_INPUT_TOKENS: 16000
+  MIN_RECENT_MESSAGES: 4
+  MESSAGE_HISTORY_LIMIT: 80
+`)
+	cfg, err := LoadWithOptions(LoadOptions{Path: path})
+	if err != nil {
+		t.Fatalf("LoadWithOptions() error = %v", err)
+	}
+	if !cfg.Database.Enabled || !cfg.Database.AutoMigrate || cfg.Database.MaxOpenConns != 12 || cfg.Database.ConnMaxLifetime != 3*time.Minute {
+		t.Fatalf("database config = %#v", cfg.Database)
+	}
+	if cfg.Context.MaxInputTokens != 16000 || cfg.Context.MinRecentMessages != 4 || cfg.Context.MessageHistoryLimit != 80 {
+		t.Fatalf("context config = %#v", cfg.Context)
+	}
+}
+
+func TestEnabledDatabaseRequiresDSN(t *testing.T) {
+	clearOverrides(t)
+	path := writeConfig(t, "MODEL_NAME: test\nMODEL_API_KEY: key\nDATABASE:\n  ENABLED: true\n")
+	_, err := LoadWithOptions(LoadOptions{Path: path})
+	if err == nil || !strings.Contains(err.Error(), "DATABASE_DSN") {
+		t.Fatalf("LoadWithOptions() error = %v", err)
+	}
+}
+
 func clearOverrides(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
@@ -261,6 +299,8 @@ func clearOverrides(t *testing.T) {
 		"AGENT_RUN_TIMEOUT", "AGENT_TOOL_TIMEOUT", "AGENT_MAX_ITERATIONS", "AGENT_MAX_MODEL_CALLS", "AGENT_MAX_TOOL_CALLS", "AGENT_MAX_REPAIR_ATTEMPTS", "AGENT_MAX_OUTPUT_TOKENS",
 		"MODEL_MAX_ATTEMPTS", "RAG_MAX_ATTEMPTS", "RETRY_BASE_DELAY", "RETRY_MAX_DELAY", "MODEL_MAX_CONCURRENCY", "RAG_MAX_CONCURRENCY", "CIRCUIT_FAILURE_THRESHOLD", "CIRCUIT_OPEN_TIMEOUT",
 		"GROUNDING_REQUIRE_RAG_FOR_NOTE_QUERY", "GROUNDING_REQUIRE_EVIDENCE_GATE", "GROUNDING_REQUIRE_CITATION_CHECK", "GROUNDING_MIN_RESULTS", "GROUNDING_MIN_TOP_SCORE", "GROUNDING_MIN_ITEM_SCORE", "GROUNDING_REQUIRE_COMPLETE_CITATION", "GROUNDING_MAX_CONTEXT_CHARS", "GROUNDING_REJECT_PROMPT_INJECTION",
+		"DATABASE_ENABLED", "DATABASE_DSN", "DATABASE_AUTO_MIGRATE", "DATABASE_MAX_OPEN_CONNS", "DATABASE_MAX_IDLE_CONNS", "DATABASE_CONN_MAX_LIFETIME",
+		"CONTEXT_MAX_INPUT_TOKENS", "CONTEXT_MIN_RECENT_MESSAGES", "CONTEXT_MESSAGE_HISTORY_LIMIT",
 	} {
 		t.Setenv(key, "")
 	}

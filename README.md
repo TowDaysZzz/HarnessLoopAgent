@@ -4,7 +4,7 @@
 
 ## 当前里程碑
 
-仓库已完成 Agent 初始化、RAG 接入和 HarnessRuntime 稳定性/证据治理：包括 Eino `ChatModelAgent`、ADK Runner、Hertz 服务与 RAG Client、有界重试、总执行预算、并发隔离、熔断、Tool 超时、RAG Evidence Policy、引用白名单和验证后输出。现阶段暂不包含笔记数据库、对外 SSE、长期记忆和洞察工作流。
+仓库已完成 Agent 初始化、RAG 接入、HarnessRuntime 稳定性/证据治理，以及会话、消息、Agent Run、持久化事件和可恢复 SSE。现阶段暂不包含笔记 CRUD、长期记忆和洞察工作流。
 
 ## 环境要求
 
@@ -23,6 +23,46 @@ go run ./cmd/note-agent-server
 `config.yaml` 可能包含密钥，因此已被 Git 忽略，也不会被复制到 Docker 镜像中。可以通过 `CONFIG_FILE` 指定其他 YAML 配置文件。与 YAML 字段同名的环境变量拥有更高优先级，适合在容器和密钥管理系统中使用。
 
 同一个 YAML 可以配置多个 OpenAI 兼容接口，例如 DeepSeek、通义千问兼容模式和 OpenAI。服务使用 `ACTIVE_MODEL` 指定的配置档案；CLI 可以使用 `--model` 临时选择其他档案。原有的扁平字段 `MODEL_NAME`、`MODEL_API_KEY` 等仍然兼容。
+
+## 会话与可恢复 SSE
+
+会话 API 需要 MySQL。先创建独立数据库和最小权限账号，再在私有 `config.yaml` 中启用：
+
+```yaml
+DATABASE:
+  ENABLED: true
+  DSN: "note_agent:replace-me@tcp(127.0.0.1:3306)/note_agent?parseTime=true&charset=utf8mb4"
+  AUTO_MIGRATE: true
+  MAX_OPEN_CONNS: 20
+  MAX_IDLE_CONNS: 10
+  CONN_MAX_LIFETIME: "5m"
+```
+
+生产环境建议通过 `DATABASE_DSN` 注入凭据，并在发布流程中执行迁移；将 `AUTO_MIGRATE` 设为 `false`。当前接口尚未接入用户认证，只适合绑定本机或置于受保护的内部网关之后，不能直接暴露到公网。
+
+创建会话和 Run：
+
+```bash
+curl -sS -X POST http://127.0.0.1:8080/v1/sessions \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"每日笔记"}'
+
+curl -sS -X POST http://127.0.0.1:8080/v1/sessions/<session_id>/runs \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: request-001' \
+  -d '{"message":"总结一下我们刚才讨论的内容"}'
+```
+
+订阅事件，并在断线后从最后一个事件继续：
+
+```bash
+curl -N http://127.0.0.1:8080/v1/runs/<run_id>/events
+curl -N http://127.0.0.1:8080/v1/runs/<run_id>/events -H 'Last-Event-ID: 12'
+```
+
+客户端断开 SSE 不会取消后台 Run；需要显式调用 `POST /v1/runs/{run_id}/cancel`。同一会话只允许一个活跃 Run，重复 `Idempotency-Key` 返回原 Run。历史笔记问题继续采用验证后输出，未通过 Grounding 校验的模型草稿不会进入 SSE。
+
+当前上下文管理使用 Token 预算下的最近消息窗口，接口已允许后续替换为参考 harness9 的 Progressive Compactor。原始消息始终保存在 MySQL，不会被摘要覆盖或删除。
 
 启用 RAG 时，在 `RAG` 节点配置独立服务地址、API Key 和允许检索的知识库：
 
@@ -106,6 +146,13 @@ RAG_BASE_URL=http://127.0.0.1:8899 \
 RAG_API_KEY="${RAG_API_KEY}" \
 RAG_INTEGRATION_KB_ID=2 \
 make integration-rag
+```
+
+使用一次性 MySQL 测试库验证 Repository：
+
+```bash
+MYSQL_INTEGRATION_DSN='user:password@tcp(127.0.0.1:3306)/disposable_db?parseTime=true' \
+make integration-mysql
 ```
 
 服务边界、后续阶段和提交顺序记录在 `docs/roadmap.md` 中；RAG HTTP 边界记录在 `docs/adr/0002-rag-http-contract.md` 中。

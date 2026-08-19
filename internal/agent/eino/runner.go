@@ -64,12 +64,24 @@ func NewRunner(ctx context.Context, chatModel model.BaseChatModel, tools []tool.
 }
 
 func (r *Runner) Stream(ctx context.Context, prompt string) <-chan appagent.Event {
+	return r.StreamMessages(ctx, []appagent.Message{{Role: "user", Content: prompt}})
+}
+
+func (r *Runner) StreamMessages(ctx context.Context, messages []appagent.Message) <-chan appagent.Event {
 	out := make(chan appagent.Event)
-	go r.run(ctx, prompt, out)
+	schemaMessages, prompt, err := toSchemaMessages(messages)
+	if err != nil {
+		close(out)
+		failed := make(chan appagent.Event, 1)
+		failed <- appagent.Event{Type: appagent.EventRunFailed, Err: err}
+		close(failed)
+		return failed
+	}
+	go r.run(ctx, schemaMessages, prompt, out)
 	return out
 }
 
-func (r *Runner) run(parent context.Context, prompt string, out chan<- appagent.Event) {
+func (r *Runner) run(parent context.Context, messages []*schema.Message, prompt string, out chan<- appagent.Event) {
 	defer close(out)
 	ctx, cancel, _ := agentruntime.Start(parent, agentruntime.Budget{
 		RunTimeout: r.options.RunTimeout, MaxModelCalls: r.options.MaxModelCalls, MaxToolCalls: r.options.MaxToolCalls,
@@ -86,7 +98,7 @@ func (r *Runner) run(parent context.Context, prompt string, out chan<- appagent.
 	if protected {
 		emit(ctx, out, appagent.Event{Type: appagent.EventStatus, Status: "retrieving"})
 	}
-	iterator := r.runner.Query(ctx, prompt)
+	iterator := r.runner.Run(ctx, messages)
 	var draft strings.Builder
 	var observation grounding.Observation
 	toolObserved := false
@@ -145,6 +157,32 @@ func (r *Runner) run(parent context.Context, prompt string, out chan<- appagent.
 		}
 	}
 	emitTerminal(out, appagent.Event{Type: appagent.EventRunCompleted})
+}
+
+func toSchemaMessages(messages []appagent.Message) ([]*schema.Message, string, error) {
+	if len(messages) == 0 {
+		return nil, "", errors.New("conversation requires at least one message")
+	}
+	converted := make([]*schema.Message, 0, len(messages))
+	for _, message := range messages {
+		content := strings.TrimSpace(message.Content)
+		if content == "" {
+			return nil, "", errors.New("conversation message content must not be empty")
+		}
+		switch message.Role {
+		case "user":
+			converted = append(converted, schema.UserMessage(content))
+		case "assistant":
+			converted = append(converted, schema.AssistantMessage(content, nil))
+		default:
+			return nil, "", fmt.Errorf("unsupported conversation role %q", message.Role)
+		}
+	}
+	last := messages[len(messages)-1]
+	if last.Role != "user" {
+		return nil, "", errors.New("conversation must end with a user message")
+	}
+	return converted, strings.TrimSpace(last.Content), nil
 }
 
 func forwardMessage(ctx context.Context, out chan<- appagent.Event, message *adk.MessageVariant) error {

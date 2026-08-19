@@ -12,7 +12,7 @@
 
 1. 初始化空仓库，加入最小可运行的 Eino 模型、Tool、流式 Runner、配置模块、健康检查、测试和容器镜像。
 2. 添加强类型 RAG HTTP Client 和 `semantic_search_notes` Eino Tool；先接入模拟 RAG Server，再连接真实的 `POST /v1/retrieve`。
-3. 添加会话、Agent Run、可持久化的 Run 事件，以及基于单调递增事件序号实现的可恢复 SSE。
+3. 已完成：添加会话、Agent Run、可持久化的 Run 事件，以及基于单调递增事件序号实现的可恢复 SSE；上下文采用可替换的 Token 预算组装接口。
 4. 添加笔记 CRUD、笔记版本、事务 Outbox，以及支持版本化写入和删除的结构化 RAG 索引。
 5. 添加确定性的意图路由、有边界的上下文压缩、Tool 权限策略和可审计的 Agent Run。
 6. 添加候选、启用、拒绝、过期四种状态的长期记忆，并支持证据关联、用户确认、自动过期和撤销。
