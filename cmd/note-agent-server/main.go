@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"errors"
 	"log"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -45,22 +43,22 @@ func run() error {
 		return err
 	}
 
-	server := httpserver.New(cfg.HTTPAddr, func() bool { return agentRunner != nil })
+	httpServer := httpserver.New(cfg.HTTPAddr, func() bool { return agentRunner != nil })
 	serverErr := make(chan error, 1)
 	go func() {
-		log.Printf("note agent listening on %s", cfg.HTTPAddr)
-		serverErr <- server.ListenAndServe()
+		log.Printf("note agent listening on %s with Hertz", cfg.HTTPAddr)
+		serverErr <- httpServer.Run()
 	}()
 
 	select {
+	case err := <-serverErr:
+		return err
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 		defer cancel()
-		return server.Shutdown(shutdownCtx)
-	case err := <-serverErr:
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
+		if err := httpServer.Shutdown(shutdownCtx); err != nil {
+			return err
 		}
-		return err
+		return <-serverErr
 	}
 }
