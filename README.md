@@ -4,7 +4,7 @@
 
 ## 当前里程碑
 
-仓库已完成 Agent 初始化和第二阶段 RAG 接入：包括 Eino `ChatModelAgent`、ADK 流式 Runner、确定性的 Echo Tool、Hertz 健康检查接口，以及通过独立 RAG HTTP 服务检索历史笔记的 `semantic_search_notes` Tool。现阶段暂不包含笔记数据库、对外 SSE、长期记忆和洞察工作流。
+仓库已完成 Agent 初始化、RAG 接入和 HarnessRuntime 稳定性/证据治理：包括 Eino `ChatModelAgent`、ADK Runner、Hertz 服务与 RAG Client、有界重试、总执行预算、并发隔离、熔断、Tool 超时、RAG Evidence Policy、引用白名单和验证后输出。现阶段暂不包含笔记数据库、对外 SSE、长期记忆和洞察工作流。
 
 ## 环境要求
 
@@ -38,6 +38,18 @@ RAG:
 ```
 
 也可以使用 `RAG_ENABLED`、`RAG_BASE_URL`、`RAG_API_KEY`、`RAG_KB_IDS`、`RAG_TIMEOUT`、`RAG_TOP_K` 和 `RAG_STRATEGY_PROFILE` 覆盖 YAML。`RAG_KB_IDS` 使用逗号分隔，例如 `2,3`。API Key、知识库 ID 和策略不会暴露为模型可填写的 Tool 参数。
+
+## HarnessRuntime 稳定性
+
+`AGENT` 控制一次完整 Run 的时间和调用预算，`RESILIENCE` 控制模型与 RAG 的重试、并发隔离和熔断。模型只会在流尚未建立时重试；一旦流已开始，中途失败会终止本次 Run，不会重新生成并输出重复内容。RAG 检索是只读操作，只对网络错误、429 和 5xx 临时错误进行有界重试。
+
+默认限制见 `config.example.yaml`。所有限制也支持同名环境变量，例如 `AGENT_RUN_TIMEOUT`、`MODEL_MAX_ATTEMPTS`、`RAG_MAX_ATTEMPTS`、`MODEL_MAX_CONCURRENCY` 和 `CIRCUIT_FAILURE_THRESHOLD`。
+
+## RAG 证据治理
+
+历史笔记问题采用验证后输出：模型生成正文时先在服务端缓冲；只有本次 Run 观察到 `semantic_search_notes`、Tool 返回 `usable=true`，并且最终回答中的文件名和 chunk ID 都属于本次检索白名单时，正文才会输出。模型跳过检索、结果低于分数阈值、citation 不完整、RAG refusal 或检索内容包含 Prompt Injection 时，Agent 程序化拒答。
+
+当前 RAG 已启用 `enable_evidence_refusal` 和 `enable_citation_consistency`。Agent 默认要求 `evidence_gate_result=pass` 和 `citation_check.supported=true`；任一字段缺失、被禁用或未通过都会 fail-closed，历史笔记问题不会进入答案生成。
 
 ## 测试真实模型
 
@@ -82,6 +94,7 @@ curl http://localhost:8080/readyz
 
 ```bash
 make check
+make test-race
 make docker-build
 ```
 

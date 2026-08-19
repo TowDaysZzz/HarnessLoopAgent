@@ -9,6 +9,7 @@ const (
 	EventToolCompleted EventType = "tool.completed"
 	EventRunCompleted  EventType = "run.completed"
 	EventRunFailed     EventType = "run.failed"
+	EventStatus        EventType = "run.status"
 )
 
 type Event struct {
@@ -16,6 +17,7 @@ type Event struct {
 	Delta    string
 	ToolName string
 	Err      error
+	Status   string
 }
 
 type StreamRunner interface {

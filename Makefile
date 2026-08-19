@@ -1,4 +1,4 @@
-.PHONY: build run chat test integration-rag vet check docker-build
+.PHONY: build run chat test test-race integration-rag vet check docker-build
 
 build:
 	go build -o bin/note-agent-server ./cmd/note-agent-server
@@ -12,6 +12,9 @@ chat:
 
 test:
 	go test ./...
+
+test-race:
+	go test -race ./internal/...
 
 integration-rag:
 	test "$(RAG_INTEGRATION)" = "1"

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/TowDaysZzz/HarnessLoopAgent/internal/grounding"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/ragclient"
 )
 
@@ -48,11 +49,11 @@ func TestSemanticSearchNotesInjectsServerOptionsAndPreservesSources(t *testing.T
 	if len(retriever.request.KBIDs) != 1 || retriever.request.KBIDs[0] != 2 {
 		t.Fatalf("server KB IDs were not injected: %#v", retriever.request.KBIDs)
 	}
-	var decoded ragclient.RetrieveResponse
+	var decoded grounding.Observation
 	if err := json.Unmarshal([]byte(output), &decoded); err != nil {
 		t.Fatalf("decode tool output: %v; output=%s", err, output)
 	}
-	if decoded.RequestID != "rag-request-1" || decoded.Items[0].Citation.FileName != "go_interview.md" || decoded.Items[0].Citation.ChunkID != "chunk-gc" {
+	if !decoded.Usable || decoded.RequestID != "rag-request-1" || decoded.Items[0].Citation.FileName != "go_interview.md" || decoded.Items[0].Citation.ChunkID != "chunk-gc" {
 		t.Fatalf("tool output lost retrieval source: %#v", decoded)
 	}
 }

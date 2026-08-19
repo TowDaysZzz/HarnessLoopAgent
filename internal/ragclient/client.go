@@ -130,12 +130,28 @@ func (c *Client) Retrieve(ctx context.Context, request RetrieveRequest) (*Retrie
 	}
 	status := resp.StatusCode()
 	if status < 200 || status >= 300 || envelope.Code != consts.StatusOK {
-		return nil, &APIError{HTTPStatus: status, Code: envelope.Code, Message: envelope.Message}
+		return nil, &APIError{HTTPStatus: status, Code: envelope.Code, Message: envelope.Message, RetryAfter: parseRetryAfter(string(resp.Header.Peek("Retry-After")))}
 	}
 	if envelope.Data.Items == nil {
 		envelope.Data.Items = []RetrieveItem{}
 	}
 	return &envelope.Data, nil
+}
+
+func parseRetryAfter(value string) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	if seconds, err := time.ParseDuration(value + "s"); err == nil {
+		return seconds
+	}
+	if deadline, err := time.Parse(time.RFC1123, value); err == nil {
+		if delay := time.Until(deadline); delay > 0 {
+			return delay
+		}
+	}
+	return 0
 }
 
 func setTraceHeaders(ctx context.Context, request *protocol.Request) {

@@ -84,6 +84,12 @@ func writeEvent(stdout, stderr io.Writer, event appagent.Event, showEvents bool)
 			return errors.New("agent run failed")
 		}
 		return event.Err
+	case appagent.EventStatus:
+		if showEvents {
+			_, err := fmt.Fprintf(stderr, "status=%s\n", event.Status)
+			return err
+		}
+		return nil
 	default:
 		return fmt.Errorf("unknown agent event %q", event.Type)
 	}

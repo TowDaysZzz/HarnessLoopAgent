@@ -24,6 +24,9 @@ type Config struct {
 	ActiveModel     string
 	Model           ModelConfig
 	RAG             RAGConfig
+	Agent           AgentConfig
+	Resilience      ResilienceConfig
+	Grounding       GroundingConfig
 }
 
 type ModelConfig struct {
@@ -44,6 +47,39 @@ type RAGConfig struct {
 	StrategyProfile string
 }
 
+type AgentConfig struct {
+	RunTimeout        time.Duration
+	ToolTimeout       time.Duration
+	MaxIterations     int
+	MaxModelCalls     int
+	MaxToolCalls      int
+	MaxRepairAttempts int
+	MaxOutputTokens   int
+}
+
+type ResilienceConfig struct {
+	ModelMaxAttempts        int
+	RAGMaxAttempts          int
+	RetryBaseDelay          time.Duration
+	RetryMaxDelay           time.Duration
+	ModelMaxConcurrency     int
+	RAGMaxConcurrency       int
+	CircuitFailureThreshold int
+	CircuitOpenTimeout      time.Duration
+}
+
+type GroundingConfig struct {
+	RequireRAGForNoteQuery  bool
+	RequireEvidenceGate     bool
+	RequireCitationCheck    bool
+	MinResults              int
+	MinTopScore             float64
+	MinItemScore            float64
+	RequireCompleteCitation bool
+	MaxContextChars         int
+	RejectPromptInjection   bool
+}
+
 type LoadOptions struct {
 	Path  string
 	Model string
@@ -55,6 +91,9 @@ type fileConfig struct {
 	ActiveModel     string                     `yaml:"ACTIVE_MODEL"`
 	Models          map[string]fileModelConfig `yaml:"MODELS"`
 	RAG             fileRAGConfig              `yaml:"RAG"`
+	Agent           fileAgentConfig            `yaml:"AGENT"`
+	Resilience      fileResilienceConfig       `yaml:"RESILIENCE"`
+	Grounding       fileGroundingConfig        `yaml:"GROUNDING"`
 
 	// 保留原有单模型配置格式的兼容性。
 	ModelProvider string `yaml:"MODEL_PROVIDER"`
@@ -62,6 +101,39 @@ type fileConfig struct {
 	ModelName     string `yaml:"MODEL_NAME"`
 	ModelAPIKey   string `yaml:"MODEL_API_KEY"`
 	ModelTimeout  string `yaml:"MODEL_TIMEOUT"`
+}
+
+type fileAgentConfig struct {
+	RunTimeout        string `yaml:"RUN_TIMEOUT"`
+	ToolTimeout       string `yaml:"TOOL_TIMEOUT"`
+	MaxIterations     int    `yaml:"MAX_ITERATIONS"`
+	MaxModelCalls     int    `yaml:"MAX_MODEL_CALLS"`
+	MaxToolCalls      int    `yaml:"MAX_TOOL_CALLS"`
+	MaxRepairAttempts int    `yaml:"MAX_REPAIR_ATTEMPTS"`
+	MaxOutputTokens   int    `yaml:"MAX_OUTPUT_TOKENS"`
+}
+
+type fileResilienceConfig struct {
+	ModelMaxAttempts        int    `yaml:"MODEL_MAX_ATTEMPTS"`
+	RAGMaxAttempts          int    `yaml:"RAG_MAX_ATTEMPTS"`
+	RetryBaseDelay          string `yaml:"RETRY_BASE_DELAY"`
+	RetryMaxDelay           string `yaml:"RETRY_MAX_DELAY"`
+	ModelMaxConcurrency     int    `yaml:"MODEL_MAX_CONCURRENCY"`
+	RAGMaxConcurrency       int    `yaml:"RAG_MAX_CONCURRENCY"`
+	CircuitFailureThreshold int    `yaml:"CIRCUIT_FAILURE_THRESHOLD"`
+	CircuitOpenTimeout      string `yaml:"CIRCUIT_OPEN_TIMEOUT"`
+}
+
+type fileGroundingConfig struct {
+	RequireRAGForNoteQuery  bool    `yaml:"REQUIRE_RAG_FOR_NOTE_QUERY"`
+	RequireEvidenceGate     bool    `yaml:"REQUIRE_EVIDENCE_GATE"`
+	RequireCitationCheck    bool    `yaml:"REQUIRE_CITATION_CHECK"`
+	MinResults              int     `yaml:"MIN_RESULTS"`
+	MinTopScore             float64 `yaml:"MIN_TOP_SCORE"`
+	MinItemScore            float64 `yaml:"MIN_ITEM_SCORE"`
+	RequireCompleteCitation bool    `yaml:"REQUIRE_COMPLETE_CITATION"`
+	MaxContextChars         int     `yaml:"MAX_CONTEXT_CHARS"`
+	RejectPromptInjection   bool    `yaml:"REJECT_PROMPT_INJECTION"`
 }
 
 type fileRAGConfig struct {
@@ -121,6 +193,26 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	runTimeout, err := parseDuration("AGENT_RUN_TIMEOUT", raw.Agent.RunTimeout)
+	if err != nil {
+		return Config{}, err
+	}
+	toolTimeout, err := parseDuration("AGENT_TOOL_TIMEOUT", raw.Agent.ToolTimeout)
+	if err != nil {
+		return Config{}, err
+	}
+	retryBaseDelay, err := parseDuration("RETRY_BASE_DELAY", raw.Resilience.RetryBaseDelay)
+	if err != nil {
+		return Config{}, err
+	}
+	retryMaxDelay, err := parseDuration("RETRY_MAX_DELAY", raw.Resilience.RetryMaxDelay)
+	if err != nil {
+		return Config{}, err
+	}
+	circuitOpenTimeout, err := parseDuration("CIRCUIT_OPEN_TIMEOUT", raw.Resilience.CircuitOpenTimeout)
+	if err != nil {
+		return Config{}, err
+	}
 
 	cfg := Config{
 		HTTPAddr:        strings.TrimSpace(raw.HTTPAddr),
@@ -141,6 +233,25 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 			Timeout:         ragTimeout,
 			TopK:            raw.RAG.TopK,
 			StrategyProfile: strings.TrimSpace(raw.RAG.StrategyProfile),
+		},
+		Agent: AgentConfig{
+			RunTimeout: runTimeout, ToolTimeout: toolTimeout,
+			MaxIterations: raw.Agent.MaxIterations, MaxModelCalls: raw.Agent.MaxModelCalls,
+			MaxToolCalls: raw.Agent.MaxToolCalls, MaxRepairAttempts: raw.Agent.MaxRepairAttempts,
+			MaxOutputTokens: raw.Agent.MaxOutputTokens,
+		},
+		Resilience: ResilienceConfig{
+			ModelMaxAttempts: raw.Resilience.ModelMaxAttempts, RAGMaxAttempts: raw.Resilience.RAGMaxAttempts,
+			RetryBaseDelay: retryBaseDelay, RetryMaxDelay: retryMaxDelay,
+			ModelMaxConcurrency: raw.Resilience.ModelMaxConcurrency, RAGMaxConcurrency: raw.Resilience.RAGMaxConcurrency,
+			CircuitFailureThreshold: raw.Resilience.CircuitFailureThreshold, CircuitOpenTimeout: circuitOpenTimeout,
+		},
+		Grounding: GroundingConfig{
+			RequireRAGForNoteQuery: raw.Grounding.RequireRAGForNoteQuery,
+			RequireEvidenceGate:    raw.Grounding.RequireEvidenceGate, RequireCitationCheck: raw.Grounding.RequireCitationCheck,
+			MinResults: raw.Grounding.MinResults, MinTopScore: raw.Grounding.MinTopScore, MinItemScore: raw.Grounding.MinItemScore,
+			RequireCompleteCitation: raw.Grounding.RequireCompleteCitation,
+			MaxContextChars:         raw.Grounding.MaxContextChars, RejectPromptInjection: raw.Grounding.RejectPromptInjection,
 		},
 	}
 	if err := cfg.Validate(); err != nil {
@@ -174,6 +285,45 @@ func (c Config) Validate() error {
 	}
 	if err := c.RAG.Validate(); err != nil {
 		return err
+	}
+	if err := c.Agent.Validate(); err != nil {
+		return err
+	}
+	if err := c.Resilience.Validate(); err != nil {
+		return err
+	}
+	if err := c.Grounding.Validate(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c AgentConfig) Validate() error {
+	if c.RunTimeout <= 0 || c.ToolTimeout <= 0 {
+		return errors.New("AGENT_RUN_TIMEOUT and AGENT_TOOL_TIMEOUT must be greater than zero")
+	}
+	if c.MaxIterations < 1 || c.MaxModelCalls < 1 || c.MaxToolCalls < 1 || c.MaxOutputTokens < 1 || c.MaxRepairAttempts < 0 {
+		return errors.New("AGENT limits must be positive and MAX_REPAIR_ATTEMPTS must not be negative")
+	}
+	return nil
+}
+
+func (c ResilienceConfig) Validate() error {
+	if c.ModelMaxAttempts < 1 || c.RAGMaxAttempts < 1 || c.ModelMaxConcurrency < 1 || c.RAGMaxConcurrency < 1 || c.CircuitFailureThreshold < 1 {
+		return errors.New("RESILIENCE attempt, concurrency, and circuit limits must be positive")
+	}
+	if c.RetryBaseDelay <= 0 || c.RetryMaxDelay < c.RetryBaseDelay || c.CircuitOpenTimeout <= 0 {
+		return errors.New("RESILIENCE durations are invalid")
+	}
+	return nil
+}
+
+func (c GroundingConfig) Validate() error {
+	if c.MinResults < 1 || c.MaxContextChars < 1 {
+		return errors.New("GROUNDING_MIN_RESULTS and GROUNDING_MAX_CONTEXT_CHARS must be positive")
+	}
+	if c.MinTopScore < 0 || c.MinTopScore > 1 || c.MinItemScore < 0 || c.MinItemScore > 1 {
+		return errors.New("GROUNDING score thresholds must be within [0,1]")
 	}
 	return nil
 }
@@ -224,6 +374,19 @@ func defaultFileConfig() fileConfig {
 			Timeout:         "10s",
 			TopK:            5,
 			StrategyProfile: "default",
+		},
+		Agent: fileAgentConfig{
+			RunTimeout: "90s", ToolTimeout: "15s", MaxIterations: 6,
+			MaxModelCalls: 3, MaxToolCalls: 3, MaxRepairAttempts: 1, MaxOutputTokens: 2000,
+		},
+		Resilience: fileResilienceConfig{
+			ModelMaxAttempts: 2, RAGMaxAttempts: 3, RetryBaseDelay: "200ms", RetryMaxDelay: "2s",
+			ModelMaxConcurrency: 8, RAGMaxConcurrency: 16, CircuitFailureThreshold: 5, CircuitOpenTimeout: "30s",
+		},
+		Grounding: fileGroundingConfig{
+			RequireRAGForNoteQuery: true, RequireEvidenceGate: true, RequireCitationCheck: true,
+			MinResults: 1, MinTopScore: 0.60, MinItemScore: 0.45,
+			RequireCompleteCitation: true, MaxContextChars: 24000, RejectPromptInjection: true,
 		},
 	}
 }
@@ -298,6 +461,11 @@ func applyServiceEnvironment(raw *fileConfig) error {
 		"RAG_API_KEY":          &raw.RAG.APIKey,
 		"RAG_TIMEOUT":          &raw.RAG.Timeout,
 		"RAG_STRATEGY_PROFILE": &raw.RAG.StrategyProfile,
+		"AGENT_RUN_TIMEOUT":    &raw.Agent.RunTimeout,
+		"AGENT_TOOL_TIMEOUT":   &raw.Agent.ToolTimeout,
+		"RETRY_BASE_DELAY":     &raw.Resilience.RetryBaseDelay,
+		"RETRY_MAX_DELAY":      &raw.Resilience.RetryMaxDelay,
+		"CIRCUIT_OPEN_TIMEOUT": &raw.Resilience.CircuitOpenTimeout,
 	})
 	if value := strings.TrimSpace(os.Getenv("RAG_ENABLED")); value != "" {
 		enabled, err := strconv.ParseBool(value)
@@ -320,6 +488,82 @@ func applyServiceEnvironment(raw *fileConfig) error {
 		}
 		raw.RAG.KBIDs = ids
 	}
+	for key, target := range map[string]*int{
+		"AGENT_MAX_ITERATIONS":        &raw.Agent.MaxIterations,
+		"AGENT_MAX_MODEL_CALLS":       &raw.Agent.MaxModelCalls,
+		"AGENT_MAX_TOOL_CALLS":        &raw.Agent.MaxToolCalls,
+		"AGENT_MAX_REPAIR_ATTEMPTS":   &raw.Agent.MaxRepairAttempts,
+		"AGENT_MAX_OUTPUT_TOKENS":     &raw.Agent.MaxOutputTokens,
+		"MODEL_MAX_ATTEMPTS":          &raw.Resilience.ModelMaxAttempts,
+		"RAG_MAX_ATTEMPTS":            &raw.Resilience.RAGMaxAttempts,
+		"MODEL_MAX_CONCURRENCY":       &raw.Resilience.ModelMaxConcurrency,
+		"RAG_MAX_CONCURRENCY":         &raw.Resilience.RAGMaxConcurrency,
+		"CIRCUIT_FAILURE_THRESHOLD":   &raw.Resilience.CircuitFailureThreshold,
+		"GROUNDING_MIN_RESULTS":       &raw.Grounding.MinResults,
+		"GROUNDING_MAX_CONTEXT_CHARS": &raw.Grounding.MaxContextChars,
+	} {
+		if err := applyIntEnvironment(key, target); err != nil {
+			return err
+		}
+	}
+	for key, target := range map[string]*float64{
+		"GROUNDING_MIN_TOP_SCORE":  &raw.Grounding.MinTopScore,
+		"GROUNDING_MIN_ITEM_SCORE": &raw.Grounding.MinItemScore,
+	} {
+		if err := applyFloatEnvironment(key, target); err != nil {
+			return err
+		}
+	}
+	for key, target := range map[string]*bool{
+		"GROUNDING_REQUIRE_RAG_FOR_NOTE_QUERY": &raw.Grounding.RequireRAGForNoteQuery,
+		"GROUNDING_REQUIRE_EVIDENCE_GATE":      &raw.Grounding.RequireEvidenceGate,
+		"GROUNDING_REQUIRE_CITATION_CHECK":     &raw.Grounding.RequireCitationCheck,
+		"GROUNDING_REQUIRE_COMPLETE_CITATION":  &raw.Grounding.RequireCompleteCitation,
+		"GROUNDING_REJECT_PROMPT_INJECTION":    &raw.Grounding.RejectPromptInjection,
+	} {
+		if err := applyBoolEnvironment(key, target); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func applyIntEnvironment(key string, target *int) error {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fmt.Errorf("parse %s: %w", key, err)
+	}
+	*target = parsed
+	return nil
+}
+
+func applyFloatEnvironment(key string, target *float64) error {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return nil
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return fmt.Errorf("parse %s: %w", key, err)
+	}
+	*target = parsed
+	return nil
+}
+
+func applyBoolEnvironment(key string, target *bool) error {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return nil
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fmt.Errorf("parse %s: %w", key, err)
+	}
+	*target = parsed
 	return nil
 }
 

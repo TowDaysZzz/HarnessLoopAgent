@@ -1,11 +1,15 @@
 package ragclient
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 type APIError struct {
 	HTTPStatus int
 	Code       int
 	Message    string
+	RetryAfter time.Duration
 }
 
 func (e *APIError) Error() string {

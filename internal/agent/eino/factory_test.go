@@ -3,6 +3,7 @@ package einoagent
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/cloudwego/eino/components/tool"
 
@@ -26,7 +27,7 @@ func TestBuildToolsFollowsRAGSwitch(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tools, err := buildTools(tt.rag, tt.retriever)
+			tools, err := buildTools(context.Background(), tt.rag, config.GroundingConfig{}, time.Second, tt.retriever)
 			if err != nil {
 				t.Fatalf("buildTools() error = %v", err)
 			}
