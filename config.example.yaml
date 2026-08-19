@@ -33,3 +33,14 @@ MODELS:
 # MODEL_NAME: "gpt-4.1-mini"
 # MODEL_API_KEY: "replace-me"
 # MODEL_TIMEOUT: "60s"
+
+# RAG 服务独立部署。API Key 和知识库 ID 只由 Agent 服务端配置，
+# 不会出现在 semantic_search_notes 的模型参数中。
+RAG:
+  ENABLED: false
+  BASE_URL: "http://127.0.0.1:8899"
+  API_KEY: "replace-me"
+  KB_IDS: [2]
+  TIMEOUT: "10s"
+  TOP_K: 5
+  STRATEGY_PROFILE: "default"

@@ -141,11 +141,78 @@ func TestLoadRejectsUnknownYAMLField(t *testing.T) {
 	}
 }
 
+func TestLoadRAGFromYAML(t *testing.T) {
+	clearOverrides(t)
+	path := writeConfig(t, `
+MODEL_NAME: test
+MODEL_API_KEY: key
+RAG:
+  ENABLED: true
+  BASE_URL: http://127.0.0.1:8899
+  API_KEY: rag_test
+  KB_IDS: [2]
+  TIMEOUT: 12s
+  TOP_K: 6
+  STRATEGY_PROFILE: hybrid
+`)
+
+	cfg, err := LoadWithOptions(LoadOptions{Path: path})
+	if err != nil {
+		t.Fatalf("LoadWithOptions() error = %v", err)
+	}
+	if !cfg.RAG.Enabled || cfg.RAG.BaseURL != "http://127.0.0.1:8899" || cfg.RAG.APIKey != "rag_test" {
+		t.Fatalf("RAG config = %#v", cfg.RAG)
+	}
+	if len(cfg.RAG.KBIDs) != 1 || cfg.RAG.KBIDs[0] != 2 || cfg.RAG.TopK != 6 || cfg.RAG.Timeout != 12*time.Second {
+		t.Fatalf("RAG config = %#v", cfg.RAG)
+	}
+}
+
+func TestRAGEnvironmentOverridesYAML(t *testing.T) {
+	clearOverrides(t)
+	path := writeConfig(t, "MODEL_NAME: test\nMODEL_API_KEY: key\n")
+	t.Setenv("RAG_ENABLED", "true")
+	t.Setenv("RAG_BASE_URL", "http://rag.example")
+	t.Setenv("RAG_API_KEY", "rag_env")
+	t.Setenv("RAG_KB_IDS", "2,3")
+	t.Setenv("RAG_TOP_K", "7")
+
+	cfg, err := LoadWithOptions(LoadOptions{Path: path})
+	if err != nil {
+		t.Fatalf("LoadWithOptions() error = %v", err)
+	}
+	if !cfg.RAG.Enabled || cfg.RAG.TopK != 7 || len(cfg.RAG.KBIDs) != 2 || cfg.RAG.KBIDs[1] != 3 {
+		t.Fatalf("RAG environment overrides = %#v", cfg.RAG)
+	}
+}
+
+func TestEnabledRAGRequiresConnectionSettings(t *testing.T) {
+	clearOverrides(t)
+	path := writeConfig(t, "MODEL_NAME: test\nMODEL_API_KEY: key\nRAG:\n  ENABLED: true\n")
+
+	_, err := LoadWithOptions(LoadOptions{Path: path})
+	if err == nil || !strings.Contains(err.Error(), "RAG_BASE_URL") || !strings.Contains(err.Error(), "RAG_API_KEY") {
+		t.Fatalf("LoadWithOptions() error = %v", err)
+	}
+}
+
+func TestRAGRejectsInvalidEnvironment(t *testing.T) {
+	clearOverrides(t)
+	path := writeConfig(t, "MODEL_NAME: test\nMODEL_API_KEY: key\n")
+	t.Setenv("RAG_ENABLED", "maybe")
+
+	_, err := LoadWithOptions(LoadOptions{Path: path})
+	if err == nil || !strings.Contains(err.Error(), "RAG_ENABLED") {
+		t.Fatalf("LoadWithOptions() error = %v", err)
+	}
+}
+
 func clearOverrides(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
 		"CONFIG_FILE", "ACTIVE_MODEL", "HTTP_ADDR", "SHUTDOWN_TIMEOUT",
 		"MODEL_PROVIDER", "MODEL_BASE_URL", "MODEL_NAME", "MODEL_API_KEY", "MODEL_TIMEOUT",
+		"RAG_ENABLED", "RAG_BASE_URL", "RAG_API_KEY", "RAG_KB_IDS", "RAG_TIMEOUT", "RAG_TOP_K", "RAG_STRATEGY_PROFILE",
 	} {
 		t.Setenv(key, "")
 	}

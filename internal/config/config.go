@@ -3,8 +3,10 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,6 +23,7 @@ type Config struct {
 	ShutdownTimeout time.Duration
 	ActiveModel     string
 	Model           ModelConfig
+	RAG             RAGConfig
 }
 
 type ModelConfig struct {
@@ -29,6 +32,16 @@ type ModelConfig struct {
 	Name     string
 	APIKey   string
 	Timeout  time.Duration
+}
+
+type RAGConfig struct {
+	Enabled         bool
+	BaseURL         string
+	APIKey          string
+	KBIDs           []uint64
+	Timeout         time.Duration
+	TopK            int
+	StrategyProfile string
 }
 
 type LoadOptions struct {
@@ -41,6 +54,7 @@ type fileConfig struct {
 	ShutdownTimeout string                     `yaml:"SHUTDOWN_TIMEOUT"`
 	ActiveModel     string                     `yaml:"ACTIVE_MODEL"`
 	Models          map[string]fileModelConfig `yaml:"MODELS"`
+	RAG             fileRAGConfig              `yaml:"RAG"`
 
 	// 保留原有单模型配置格式的兼容性。
 	ModelProvider string `yaml:"MODEL_PROVIDER"`
@@ -48,6 +62,16 @@ type fileConfig struct {
 	ModelName     string `yaml:"MODEL_NAME"`
 	ModelAPIKey   string `yaml:"MODEL_API_KEY"`
 	ModelTimeout  string `yaml:"MODEL_TIMEOUT"`
+}
+
+type fileRAGConfig struct {
+	Enabled         bool     `yaml:"ENABLED"`
+	BaseURL         string   `yaml:"BASE_URL"`
+	APIKey          string   `yaml:"API_KEY"`
+	KBIDs           []uint64 `yaml:"KB_IDS"`
+	Timeout         string   `yaml:"TIMEOUT"`
+	TopK            int      `yaml:"TOP_K"`
+	StrategyProfile string   `yaml:"STRATEGY_PROFILE"`
 }
 
 type fileModelConfig struct {
@@ -71,7 +95,9 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 		}
 	}
 
-	applyServiceEnvironment(&raw)
+	if err := applyServiceEnvironment(&raw); err != nil {
+		return Config{}, err
+	}
 	selectedName := firstNonEmpty(
 		strings.TrimSpace(options.Model),
 		strings.TrimSpace(os.Getenv("ACTIVE_MODEL")),
@@ -91,6 +117,10 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	ragTimeout, err := parseDuration("RAG_TIMEOUT", raw.RAG.Timeout)
+	if err != nil {
+		return Config{}, err
+	}
 
 	cfg := Config{
 		HTTPAddr:        strings.TrimSpace(raw.HTTPAddr),
@@ -102,6 +132,15 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 			Name:     strings.TrimSpace(selected.Name),
 			APIKey:   strings.TrimSpace(selected.APIKey),
 			Timeout:  modelTimeout,
+		},
+		RAG: RAGConfig{
+			Enabled:         raw.RAG.Enabled,
+			BaseURL:         strings.TrimRight(strings.TrimSpace(raw.RAG.BaseURL), "/"),
+			APIKey:          strings.TrimSpace(raw.RAG.APIKey),
+			KBIDs:           append([]uint64(nil), raw.RAG.KBIDs...),
+			Timeout:         ragTimeout,
+			TopK:            raw.RAG.TopK,
+			StrategyProfile: strings.TrimSpace(raw.RAG.StrategyProfile),
 		},
 	}
 	if err := cfg.Validate(); err != nil {
@@ -133,6 +172,44 @@ func (c Config) Validate() error {
 	if c.ShutdownTimeout <= 0 {
 		return errors.New("SHUTDOWN_TIMEOUT must be greater than zero")
 	}
+	if err := c.RAG.Validate(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c RAGConfig) Validate() error {
+	if c.Timeout <= 0 {
+		return errors.New("RAG_TIMEOUT must be greater than zero")
+	}
+	if c.TopK < 1 || c.TopK > 20 {
+		return errors.New("RAG_TOP_K must be between 1 and 20")
+	}
+	if !c.Enabled {
+		return nil
+	}
+	var missing []string
+	if c.BaseURL == "" {
+		missing = append(missing, "RAG_BASE_URL")
+	}
+	if c.APIKey == "" {
+		missing = append(missing, "RAG_API_KEY")
+	}
+	if len(c.KBIDs) == 0 {
+		missing = append(missing, "RAG_KB_IDS")
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("missing required RAG configuration: %s", strings.Join(missing, ", "))
+	}
+	parsed, err := url.ParseRequestURI(c.BaseURL)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return fmt.Errorf("RAG_BASE_URL must be an absolute HTTP(S) URL")
+	}
+	for _, kbID := range c.KBIDs {
+		if kbID == 0 {
+			return errors.New("RAG_KB_IDS must contain only positive IDs")
+		}
+	}
 	return nil
 }
 
@@ -143,6 +220,11 @@ func defaultFileConfig() fileConfig {
 		ModelProvider:   openAICompatible,
 		ModelBaseURL:    "https://api.openai.com/v1",
 		ModelTimeout:    "60s",
+		RAG: fileRAGConfig{
+			Timeout:         "10s",
+			TopK:            5,
+			StrategyProfile: "default",
+		},
 	}
 }
 
@@ -206,11 +288,39 @@ func readYAML(path string, target *fileConfig) error {
 	return nil
 }
 
-func applyServiceEnvironment(raw *fileConfig) {
+func applyServiceEnvironment(raw *fileConfig) error {
 	applyEnvironment(map[string]*string{
 		"HTTP_ADDR":        &raw.HTTPAddr,
 		"SHUTDOWN_TIMEOUT": &raw.ShutdownTimeout,
 	})
+	applyEnvironment(map[string]*string{
+		"RAG_BASE_URL":         &raw.RAG.BaseURL,
+		"RAG_API_KEY":          &raw.RAG.APIKey,
+		"RAG_TIMEOUT":          &raw.RAG.Timeout,
+		"RAG_STRATEGY_PROFILE": &raw.RAG.StrategyProfile,
+	})
+	if value := strings.TrimSpace(os.Getenv("RAG_ENABLED")); value != "" {
+		enabled, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("parse RAG_ENABLED: %w", err)
+		}
+		raw.RAG.Enabled = enabled
+	}
+	if value := strings.TrimSpace(os.Getenv("RAG_TOP_K")); value != "" {
+		topK, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("parse RAG_TOP_K: %w", err)
+		}
+		raw.RAG.TopK = topK
+	}
+	if value := strings.TrimSpace(os.Getenv("RAG_KB_IDS")); value != "" {
+		ids, err := parseUint64List(value)
+		if err != nil {
+			return fmt.Errorf("parse RAG_KB_IDS: %w", err)
+		}
+		raw.RAG.KBIDs = ids
+	}
+	return nil
 }
 
 func applyModelEnvironment(raw *fileModelConfig) {
@@ -238,6 +348,19 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func parseUint64List(raw string) ([]uint64, error) {
+	parts := strings.Split(raw, ",")
+	ids := make([]uint64, 0, len(parts))
+	for _, part := range parts {
+		id, err := strconv.ParseUint(strings.TrimSpace(part), 10, 64)
+		if err != nil || id == 0 {
+			return nil, fmt.Errorf("invalid knowledge base ID %q", strings.TrimSpace(part))
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
 }
 
 func parseDuration(key, raw string) (time.Duration, error) {

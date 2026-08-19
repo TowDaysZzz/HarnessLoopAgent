@@ -10,8 +10,6 @@ import (
 	"os/signal"
 	"strings"
 
-	"github.com/cloudwego/eino/components/tool"
-
 	appagent "github.com/TowDaysZzz/HarnessLoopAgent/internal/agent"
 	einoagent "github.com/TowDaysZzz/HarnessLoopAgent/internal/agent/eino"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/config"
@@ -45,15 +43,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	chatModel, err := einoagent.NewModel(ctx, cfg.Model)
-	if err != nil {
-		return err
-	}
-	echoTool, err := einoagent.NewEchoTool()
-	if err != nil {
-		return err
-	}
-	runner, err := einoagent.NewRunner(ctx, chatModel, []tool.BaseTool{echoTool})
+	runner, err := einoagent.NewConfiguredRunner(ctx, cfg)
 	if err != nil {
 		return err
 	}

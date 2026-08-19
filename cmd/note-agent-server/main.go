@@ -7,8 +7,6 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/cloudwego/eino/components/tool"
-
 	einoagent "github.com/TowDaysZzz/HarnessLoopAgent/internal/agent/eino"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/config"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/platform/httpserver"
@@ -30,15 +28,7 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	chatModel, err := einoagent.NewModel(ctx, cfg.Model)
-	if err != nil {
-		return err
-	}
-	echoTool, err := einoagent.NewEchoTool()
-	if err != nil {
-		return err
-	}
-	agentRunner, err := einoagent.NewRunner(ctx, chatModel, []tool.BaseTool{echoTool})
+	agentRunner, err := einoagent.NewConfiguredRunner(ctx, cfg)
 	if err != nil {
 		return err
 	}
