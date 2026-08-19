@@ -1,14 +1,14 @@
-# ADR 0001: Eino dependency baseline
+# ADR 0001：Eino 依赖版本基线
 
-- Status: Accepted
-- Date: 2026-08-18
+- 状态：已采纳
+- 日期：2026-08-18
 
-## Decision
+## 决策
 
-The Agent service starts with `github.com/cloudwego/eino v0.9.9` and the OpenAI-compatible model component `github.com/cloudwego/eino-ext/components/model/openai v0.1.13`.
+Agent 服务初始化使用 `github.com/cloudwego/eino v0.9.9`，OpenAI 兼容模型组件使用 `github.com/cloudwego/eino-ext/components/model/openai v0.1.13`。
 
-This combination was selected from stable versions available during the bootstrap and compiled against the required `ChatModelAgent`, `Runner`, tool, and streaming APIs. Dependencies are pinned rather than taken from a branch.
+该版本组合来自初始化时可用的稳定版本，并已经通过 `ChatModelAgent`、`Runner`、Tool 和流式 API 的编译与测试验证。项目固定使用明确的发布版本，不直接依赖开发分支。
 
-## Consequences
+## 影响
 
-The independently deployed RAG service can remain on Eino v0.7.28. The services communicate through versioned HTTP contracts and do not import each other's Eino implementation packages. Future dependency upgrades require a focused compatibility PR and this ADR must be superseded.
+独立部署的 RAG 服务可以继续使用 Eino v0.7.28。两个服务通过有版本的 HTTP 契约通信，不互相导入 Eino 实现包。后续升级依赖时，需要建立独立的兼容性 PR，并使用新的 ADR 替代本决策。

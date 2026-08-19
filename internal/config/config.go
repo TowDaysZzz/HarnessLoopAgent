@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -18,6 +19,7 @@ const (
 type Config struct {
 	HTTPAddr        string
 	ShutdownTimeout time.Duration
+	ActiveModel     string
 	Model           ModelConfig
 }
 
@@ -29,33 +31,59 @@ type ModelConfig struct {
 	Timeout  time.Duration
 }
 
+type LoadOptions struct {
+	Path  string
+	Model string
+}
+
 type fileConfig struct {
-	HTTPAddr        string `yaml:"HTTP_ADDR"`
-	ShutdownTimeout string `yaml:"SHUTDOWN_TIMEOUT"`
-	ModelProvider   string `yaml:"MODEL_PROVIDER"`
-	ModelBaseURL    string `yaml:"MODEL_BASE_URL"`
-	ModelName       string `yaml:"MODEL_NAME"`
-	ModelAPIKey     string `yaml:"MODEL_API_KEY"`
-	ModelTimeout    string `yaml:"MODEL_TIMEOUT"`
+	HTTPAddr        string                     `yaml:"HTTP_ADDR"`
+	ShutdownTimeout string                     `yaml:"SHUTDOWN_TIMEOUT"`
+	ActiveModel     string                     `yaml:"ACTIVE_MODEL"`
+	Models          map[string]fileModelConfig `yaml:"MODELS"`
+
+	// 保留原有单模型配置格式的兼容性。
+	ModelProvider string `yaml:"MODEL_PROVIDER"`
+	ModelBaseURL  string `yaml:"MODEL_BASE_URL"`
+	ModelName     string `yaml:"MODEL_NAME"`
+	ModelAPIKey   string `yaml:"MODEL_API_KEY"`
+	ModelTimeout  string `yaml:"MODEL_TIMEOUT"`
+}
+
+type fileModelConfig struct {
+	Provider string `yaml:"PROVIDER"`
+	BaseURL  string `yaml:"BASE_URL"`
+	Name     string `yaml:"MODEL_NAME"`
+	APIKey   string `yaml:"API_KEY"`
+	Timeout  string `yaml:"TIMEOUT"`
 }
 
 func Load() (Config, error) {
-	path, explicitlyConfigured := os.LookupEnv("CONFIG_FILE")
-	path = strings.TrimSpace(path)
-	if path == "" {
-		path = defaultConfigFile
-		explicitlyConfigured = false
-	}
+	return LoadWithOptions(LoadOptions{})
+}
 
+func LoadWithOptions(options LoadOptions) (Config, error) {
+	path, explicitlyConfigured := configPath(options.Path)
 	raw := defaultFileConfig()
 	if err := readYAML(path, &raw); err != nil {
 		if explicitlyConfigured || !errors.Is(err, os.ErrNotExist) {
 			return Config{}, err
 		}
 	}
-	applyEnvironment(&raw)
 
-	modelTimeout, err := parseDuration("MODEL_TIMEOUT", raw.ModelTimeout)
+	applyServiceEnvironment(&raw)
+	selectedName := firstNonEmpty(
+		strings.TrimSpace(options.Model),
+		strings.TrimSpace(os.Getenv("ACTIVE_MODEL")),
+		strings.TrimSpace(raw.ActiveModel),
+	)
+	selected, err := selectModel(raw, selectedName)
+	if err != nil {
+		return Config{}, err
+	}
+	applyModelEnvironment(&selected)
+
+	modelTimeout, err := parseDuration("MODEL_TIMEOUT", selected.Timeout)
 	if err != nil {
 		return Config{}, err
 	}
@@ -67,11 +95,12 @@ func Load() (Config, error) {
 	cfg := Config{
 		HTTPAddr:        strings.TrimSpace(raw.HTTPAddr),
 		ShutdownTimeout: shutdownTimeout,
+		ActiveModel:     selectedName,
 		Model: ModelConfig{
-			Provider: strings.TrimSpace(raw.ModelProvider),
-			BaseURL:  strings.TrimSpace(raw.ModelBaseURL),
-			Name:     strings.TrimSpace(raw.ModelName),
-			APIKey:   strings.TrimSpace(raw.ModelAPIKey),
+			Provider: strings.TrimSpace(selected.Provider),
+			BaseURL:  strings.TrimSpace(selected.BaseURL),
+			Name:     strings.TrimSpace(selected.Name),
+			APIKey:   strings.TrimSpace(selected.APIKey),
 			Timeout:  modelTimeout,
 		},
 	}
@@ -90,16 +119,16 @@ func (c Config) Validate() error {
 		missing = append(missing, "MODEL_NAME")
 	}
 	if c.Model.APIKey == "" {
-		missing = append(missing, "MODEL_API_KEY")
+		missing = append(missing, "MODEL_API_KEY/API_KEY")
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("missing required configuration: %s", strings.Join(missing, ", "))
 	}
 	if c.Model.Provider != openAICompatible {
-		return fmt.Errorf("unsupported MODEL_PROVIDER %q", c.Model.Provider)
+		return fmt.Errorf("unsupported model provider %q", c.Model.Provider)
 	}
 	if c.Model.Timeout <= 0 {
-		return errors.New("MODEL_TIMEOUT must be greater than zero")
+		return errors.New("MODEL_TIMEOUT/TIMEOUT must be greater than zero")
 	}
 	if c.ShutdownTimeout <= 0 {
 		return errors.New("SHUTDOWN_TIMEOUT must be greater than zero")
@@ -117,6 +146,53 @@ func defaultFileConfig() fileConfig {
 	}
 }
 
+func configPath(optionPath string) (string, bool) {
+	if path := strings.TrimSpace(optionPath); path != "" {
+		return path, true
+	}
+	if path := strings.TrimSpace(os.Getenv("CONFIG_FILE")); path != "" {
+		return path, true
+	}
+	return defaultConfigFile, false
+}
+
+func selectModel(raw fileConfig, selectedName string) (fileModelConfig, error) {
+	if len(raw.Models) == 0 {
+		if selectedName != "" {
+			return fileModelConfig{}, fmt.Errorf("model profile %q requested, but MODELS is empty", selectedName)
+		}
+		return fileModelConfig{
+			Provider: raw.ModelProvider,
+			BaseURL:  raw.ModelBaseURL,
+			Name:     raw.ModelName,
+			APIKey:   raw.ModelAPIKey,
+			Timeout:  raw.ModelTimeout,
+		}, nil
+	}
+	if selectedName == "" {
+		return fileModelConfig{}, errors.New("ACTIVE_MODEL is required when MODELS contains profiles")
+	}
+	selected, ok := raw.Models[selectedName]
+	if !ok {
+		names := make([]string, 0, len(raw.Models))
+		for name := range raw.Models {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		return fileModelConfig{}, fmt.Errorf("unknown model profile %q; available profiles: %s", selectedName, strings.Join(names, ", "))
+	}
+	if strings.TrimSpace(selected.Provider) == "" {
+		selected.Provider = openAICompatible
+	}
+	if strings.TrimSpace(selected.BaseURL) == "" {
+		selected.BaseURL = "https://api.openai.com/v1"
+	}
+	if strings.TrimSpace(selected.Timeout) == "" {
+		selected.Timeout = "60s"
+	}
+	return selected, nil
+}
+
 func readYAML(path string, target *fileConfig) error {
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -130,21 +206,38 @@ func readYAML(path string, target *fileConfig) error {
 	return nil
 }
 
-func applyEnvironment(raw *fileConfig) {
-	overrides := map[string]*string{
+func applyServiceEnvironment(raw *fileConfig) {
+	applyEnvironment(map[string]*string{
 		"HTTP_ADDR":        &raw.HTTPAddr,
 		"SHUTDOWN_TIMEOUT": &raw.ShutdownTimeout,
-		"MODEL_PROVIDER":   &raw.ModelProvider,
-		"MODEL_BASE_URL":   &raw.ModelBaseURL,
-		"MODEL_NAME":       &raw.ModelName,
-		"MODEL_API_KEY":    &raw.ModelAPIKey,
-		"MODEL_TIMEOUT":    &raw.ModelTimeout,
-	}
+	})
+}
+
+func applyModelEnvironment(raw *fileModelConfig) {
+	applyEnvironment(map[string]*string{
+		"MODEL_PROVIDER": &raw.Provider,
+		"MODEL_BASE_URL": &raw.BaseURL,
+		"MODEL_NAME":     &raw.Name,
+		"MODEL_API_KEY":  &raw.APIKey,
+		"MODEL_TIMEOUT":  &raw.Timeout,
+	})
+}
+
+func applyEnvironment(overrides map[string]*string) {
 	for key, target := range overrides {
 		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
 			*target = value
 		}
 	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func parseDuration(key, raw string) (time.Duration, error) {
