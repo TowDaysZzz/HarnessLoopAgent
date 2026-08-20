@@ -33,6 +33,7 @@ type RunnerOptions struct {
 	MaxRepairAttempts      int
 	RequireRAGForNoteQuery bool
 	Observer               agentruntime.Observer
+	Metrics                *agentruntime.Metrics
 }
 
 type Runner struct {
@@ -61,6 +62,13 @@ func NewRunner(ctx context.Context, chatModel model.BaseChatModel, tools []tool.
 		return nil, err
 	}
 	return &Runner{runner: adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent, EnableStreaming: true}), chatModel: chatModel, options: options}, nil
+}
+
+func (r *Runner) Metrics() agentruntime.SnapshotMetrics {
+	if r.options.Metrics == nil {
+		return agentruntime.SnapshotMetrics{}
+	}
+	return r.options.Metrics.Snapshot()
 }
 
 func (r *Runner) Stream(ctx context.Context, prompt string) <-chan appagent.Event {

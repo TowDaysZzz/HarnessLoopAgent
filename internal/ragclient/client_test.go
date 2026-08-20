@@ -107,6 +107,50 @@ func TestRetrieveHonorsTimeout(t *testing.T) {
 	}
 }
 
+func TestUserNoteAPIsRequireAndForwardAccessToken(t *testing.T) {
+	client := newTestClient(t, doerFunc(func(_ context.Context, request *protocol.Request, response *protocol.Response) error {
+		if got := request.Header.Get("Authorization"); got != "Bearer user-jwt" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		if got := request.Header.Get("Idempotency-Key"); got != "note-1" {
+			t.Fatalf("Idempotency-Key = %q", got)
+		}
+		response.SetStatusCode(200)
+		response.SetBodyString(`{"code":200,"message":"Success","data":{"document_id":10,"job_id":20,"external_note_id":"note-1","status":"pending","reused":false}}`)
+		return nil
+	}))
+	_, err := client.CreateNote(context.Background(), CreateNoteRequest{KBID: 5, ExternalNoteID: "note-1", Title: "title", Content: "content"})
+	if err == nil || !strings.Contains(err.Error(), "user access token is required") {
+		t.Fatalf("CreateNote() without token error = %v", err)
+	}
+	ctx := WithUserAccessToken(context.Background(), "user-jwt")
+	created, err := client.CreateNote(ctx, CreateNoteRequest{KBID: 5, ExternalNoteID: "note-1", Title: "title", Content: "content"})
+	if err != nil {
+		t.Fatalf("CreateNote() error = %v", err)
+	}
+	if created.DocumentID != 10 || created.JobID != 20 || created.Status != "pending" {
+		t.Fatalf("CreateNote() = %#v", created)
+	}
+}
+
+func TestAuthAPIsDoNotSendStaticAPIKey(t *testing.T) {
+	client := newTestClient(t, doerFunc(func(_ context.Context, request *protocol.Request, response *protocol.Response) error {
+		if got := request.Header.Get("Authorization"); got != "" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		response.SetStatusCode(200)
+		response.SetBodyString(`{"code":200,"message":"Success","data":{"access_token":"access","refresh_token":"refresh","expires_in":7200,"user_id":3,"role":"owner","tenant_id":3}}`)
+		return nil
+	}))
+	result, err := client.Login(context.Background(), LoginRequest{Email: "user@example.com", Password: "secret"})
+	if err != nil {
+		t.Fatalf("Login() error = %v", err)
+	}
+	if result.AccessToken != "access" || result.UserID != 3 || result.TenantID != 3 {
+		t.Fatalf("Login() = %#v", result)
+	}
+}
+
 func newTestClient(t *testing.T, doer doer) *Client {
 	t.Helper()
 	client, err := newClient(ClientConfig{BaseURL: "http://rag.test", APIKey: "rag_test", Timeout: time.Second}, doer)

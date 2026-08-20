@@ -13,6 +13,17 @@ DATABASE:
   MAX_IDLE_CONNS: 10
   CONN_MAX_LIFETIME: "5m"
 
+AUTH:
+  ENABLED: false
+  SESSION_SECRET: "replace-with-at-least-32-random-characters"
+  SESSION_TTL: "168h"
+  COOKIE_NAME: "note_agent_session"
+  COOKIE_SECURE: false
+
+NOTE:
+  ENABLED: false
+  KB_ID: 0
+
 # 当前使用有界最近消息窗口。后续 ProgressiveCompactor 将实现同一组装接口。
 CONTEXT:
   MAX_INPUT_TOKENS: 24000
@@ -64,6 +75,7 @@ RAG:
 # HarnessRuntime 为一次 Agent Run 设置总预算。MODEL TIMEOUT 约束单次 HTTP 请求，
 # RUN_TIMEOUT 约束包括模型、Tool、重试和回答校验在内的完整执行时间。
 AGENT:
+  ENABLE_MULTI_AGENT: false
   RUN_TIMEOUT: "90s"
   TOOL_TIMEOUT: "15s"
   MAX_ITERATIONS: 6

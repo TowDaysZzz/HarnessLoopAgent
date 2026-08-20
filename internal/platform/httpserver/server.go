@@ -14,7 +14,10 @@ import (
 	"github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 
+	agentauth "github.com/TowDaysZzz/HarnessLoopAgent/internal/auth"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/chat"
+	"github.com/TowDaysZzz/HarnessLoopAgent/internal/mcpfacade"
+	"github.com/TowDaysZzz/HarnessLoopAgent/internal/note"
 )
 
 type Server struct {
@@ -24,11 +27,36 @@ type Server struct {
 type Option func(*serverOptions)
 
 type serverOptions struct {
-	chat *chat.Service
+	chat       *chat.Service
+	auth       *agentauth.Service
+	note       *note.Service
+	mcp        *mcpfacade.Facade
+	authCookie AuthCookieConfig
+}
+
+type AuthCookieConfig struct {
+	Name   string
+	Secure bool
+	MaxAge time.Duration
 }
 
 func WithChatService(service *chat.Service) Option {
 	return func(options *serverOptions) { options.chat = service }
+}
+
+func WithAuthService(service *agentauth.Service, cookie AuthCookieConfig) Option {
+	return func(options *serverOptions) {
+		options.auth = service
+		options.authCookie = cookie
+	}
+}
+
+func WithNoteService(service *note.Service) Option {
+	return func(options *serverOptions) { options.note = service }
+}
+
+func WithMCPFacade(facade *mcpfacade.Facade) Option {
+	return func(options *serverOptions) { options.mcp = facade }
 }
 
 func New(addr string, ready func() bool, options ...Option) *Server {
@@ -46,6 +74,15 @@ func New(addr string, ready func() bool, options ...Option) *Server {
 	})
 	if configured.chat != nil {
 		registerChatRoutes(h, configured.chat)
+	}
+	if configured.auth != nil {
+		registerAuthRoutes(h, configured.auth, configured.authCookie)
+		if configured.note != nil {
+			registerNoteRoutes(h, configured.auth, configured.note, configured.authCookie)
+		}
+		if configured.mcp != nil {
+			registerMCPRoute(h, configured.auth, configured.mcp, configured.authCookie)
+		}
 	}
 	h.GET("/readyz", func(ctx context.Context, c *app.RequestContext) {
 		if !ready() {

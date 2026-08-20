@@ -2,17 +2,23 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
 
 	einoagent "github.com/TowDaysZzz/HarnessLoopAgent/internal/agent/eino"
+	agentauth "github.com/TowDaysZzz/HarnessLoopAgent/internal/auth"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/chat"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/config"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/contextmanager"
+	"github.com/TowDaysZzz/HarnessLoopAgent/internal/mcpfacade"
+	"github.com/TowDaysZzz/HarnessLoopAgent/internal/note"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/platform/httpserver"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/platform/mysqlstore"
+	"github.com/TowDaysZzz/HarnessLoopAgent/internal/ragclient"
+	"github.com/TowDaysZzz/HarnessLoopAgent/internal/tools"
 )
 
 func main() {
@@ -63,6 +69,44 @@ func run() error {
 			return err
 		}
 		serverOptions = append(serverOptions, httpserver.WithChatService(chatService))
+
+		if cfg.Auth.Enabled {
+			rag, err := ragclient.NewClient(ragclient.ClientConfig{BaseURL: cfg.RAG.BaseURL, APIKey: cfg.RAG.APIKey, Timeout: cfg.RAG.Timeout})
+			if err != nil {
+				return err
+			}
+			authService, err := agentauth.NewService(store, rag, cfg.Auth.SessionSecret, cfg.Auth.SessionTTL)
+			if err != nil {
+				return err
+			}
+			serverOptions = append(serverOptions, httpserver.WithAuthService(authService, httpserver.AuthCookieConfig{
+				Name: cfg.Auth.CookieName, Secure: cfg.Auth.CookieSecure, MaxAge: cfg.Auth.SessionTTL,
+			}))
+			if cfg.Note.Enabled {
+				noteService, err := note.NewService(store, rag, cfg.Note.KBID)
+				if err != nil {
+					return err
+				}
+				serverOptions = append(serverOptions, httpserver.WithNoteService(noteService))
+				registry := tools.NewRegistry()
+				_ = registry.Register(tools.Definition{Name: "notes.list", Description: "List the authenticated user's notes", Roles: []string{"*"}, ReadOnly: true, Handler: func(toolCtx context.Context, _ []byte) ([]byte, error) {
+					principal, ok := agentauth.PrincipalFromContext(toolCtx)
+					if !ok {
+						return nil, agentauth.ErrUnauthenticated
+					}
+					items, err := noteService.List(toolCtx, principal, 20, "")
+					if err != nil {
+						return nil, err
+					}
+					return json.Marshal(map[string]any{"items": items})
+				}})
+				facade, err := mcpfacade.New(registry)
+				if err != nil {
+					return err
+				}
+				serverOptions = append(serverOptions, httpserver.WithMCPFacade(facade))
+			}
+		}
 	}
 
 	httpServer := httpserver.New(cfg.HTTPAddr, func() bool { return agentRunner != nil && (!cfg.Database.Enabled || store != nil) }, serverOptions...)

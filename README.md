@@ -4,7 +4,7 @@
 
 ## 当前里程碑
 
-仓库已完成 Agent 初始化、RAG 接入、HarnessRuntime 稳定性/证据治理，以及会话、消息、Agent Run、持久化事件和可恢复 SSE。现阶段暂不包含笔记 CRUD、长期记忆和洞察工作流。
+仓库已完成 Agent 初始化、RAG 接入、HarnessRuntime 稳定性/证据治理，会话、消息、Agent Run、持久化事件、可恢复 SSE，以及第一版 BFF 认证和笔记新增/查询/删除链路。长期记忆、洞察工作流和前端仍在后续阶段。
 
 ## 环境要求
 
@@ -38,7 +38,26 @@ DATABASE:
   CONN_MAX_LIFETIME: "5m"
 ```
 
-生产环境建议通过 `DATABASE_DSN` 注入凭据，并在发布流程中执行迁移；将 `AUTO_MIGRATE` 设为 `false`。当前接口尚未接入用户认证，只适合绑定本机或置于受保护的内部网关之后，不能直接暴露到公网。
+生产环境建议通过 `DATABASE_DSN` 和 `AUTH_SESSION_SECRET` 注入凭据，并在发布流程中执行迁移；将 `AUTO_MIGRATE` 设为 `false`。启用 `AUTH` 后，浏览器只持有 HttpOnly Cookie，Agent 服务端负责保存和刷新 RAG Token。
+
+启用认证和笔记投影：
+
+```yaml
+AUTH:
+  ENABLED: true
+  SESSION_SECRET: "at-least-32-random-characters-from-a-secret-manager"
+  SESSION_TTL: "168h"
+  COOKIE_NAME: "note_agent_session"
+  COOKIE_SECURE: false
+
+NOTE:
+  ENABLED: true
+  KB_ID: 5
+```
+
+认证接口：`POST /v1/auth/register`、`POST /v1/auth/login`、`POST /v1/auth/refresh`、`POST /v1/auth/logout`、`GET /v1/auth/me`。
+
+笔记接口：`POST /v1/notes`、`GET /v1/notes`、`GET /v1/notes/{note_id}`、`GET /v1/notes/{note_id}/status`、`DELETE /v1/notes/{note_id}`。创建和删除必须携带 `Idempotency-Key`。笔记原文首先写入 Agent MySQL，再通过 Outbox 投影到 RAG；RAG 任务返回 `pending` 时本地状态保持 `indexing`，不会提前标记为 `indexed`。
 
 创建会话和 Run：
 

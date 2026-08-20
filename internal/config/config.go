@@ -29,6 +29,8 @@ type Config struct {
 	Grounding       GroundingConfig
 	Database        DatabaseConfig
 	Context         ContextConfig
+	Auth            AuthConfig
+	Note            NoteConfig
 }
 
 type ModelConfig struct {
@@ -50,6 +52,7 @@ type RAGConfig struct {
 }
 
 type AgentConfig struct {
+	EnableMultiAgent  bool
 	RunTimeout        time.Duration
 	ToolTimeout       time.Duration
 	MaxIterations     int
@@ -97,6 +100,19 @@ type ContextConfig struct {
 	MessageHistoryLimit int
 }
 
+type AuthConfig struct {
+	Enabled       bool
+	SessionSecret string
+	SessionTTL    time.Duration
+	CookieName    string
+	CookieSecure  bool
+}
+
+type NoteConfig struct {
+	Enabled bool
+	KBID    uint64
+}
+
 type LoadOptions struct {
 	Path  string
 	Model string
@@ -113,6 +129,8 @@ type fileConfig struct {
 	Grounding       fileGroundingConfig        `yaml:"GROUNDING"`
 	Database        fileDatabaseConfig         `yaml:"DATABASE"`
 	Context         fileContextConfig          `yaml:"CONTEXT"`
+	Auth            fileAuthConfig             `yaml:"AUTH"`
+	Note            fileNoteConfig             `yaml:"NOTE"`
 
 	// 保留原有单模型配置格式的兼容性。
 	ModelProvider string `yaml:"MODEL_PROVIDER"`
@@ -123,6 +141,7 @@ type fileConfig struct {
 }
 
 type fileAgentConfig struct {
+	EnableMultiAgent  bool   `yaml:"ENABLE_MULTI_AGENT"`
 	RunTimeout        string `yaml:"RUN_TIMEOUT"`
 	ToolTimeout       string `yaml:"TOOL_TIMEOUT"`
 	MaxIterations     int    `yaml:"MAX_ITERATIONS"`
@@ -168,6 +187,19 @@ type fileContextConfig struct {
 	MaxInputTokens      int `yaml:"MAX_INPUT_TOKENS"`
 	MinRecentMessages   int `yaml:"MIN_RECENT_MESSAGES"`
 	MessageHistoryLimit int `yaml:"MESSAGE_HISTORY_LIMIT"`
+}
+
+type fileAuthConfig struct {
+	Enabled       bool   `yaml:"ENABLED"`
+	SessionSecret string `yaml:"SESSION_SECRET"`
+	SessionTTL    string `yaml:"SESSION_TTL"`
+	CookieName    string `yaml:"COOKIE_NAME"`
+	CookieSecure  bool   `yaml:"COOKIE_SECURE"`
+}
+
+type fileNoteConfig struct {
+	Enabled bool   `yaml:"ENABLED"`
+	KBID    uint64 `yaml:"KB_ID"`
 }
 
 type fileRAGConfig struct {
@@ -251,6 +283,10 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	sessionTTL, err := parseDuration("AUTH_SESSION_TTL", raw.Auth.SessionTTL)
+	if err != nil {
+		return Config{}, err
+	}
 
 	cfg := Config{
 		HTTPAddr:        strings.TrimSpace(raw.HTTPAddr),
@@ -273,7 +309,8 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 			StrategyProfile: strings.TrimSpace(raw.RAG.StrategyProfile),
 		},
 		Agent: AgentConfig{
-			RunTimeout: runTimeout, ToolTimeout: toolTimeout,
+			EnableMultiAgent: raw.Agent.EnableMultiAgent,
+			RunTimeout:       runTimeout, ToolTimeout: toolTimeout,
 			MaxIterations: raw.Agent.MaxIterations, MaxModelCalls: raw.Agent.MaxModelCalls,
 			MaxToolCalls: raw.Agent.MaxToolCalls, MaxRepairAttempts: raw.Agent.MaxRepairAttempts,
 			MaxOutputTokens: raw.Agent.MaxOutputTokens,
@@ -299,6 +336,11 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 			MaxInputTokens: raw.Context.MaxInputTokens, MinRecentMessages: raw.Context.MinRecentMessages,
 			MessageHistoryLimit: raw.Context.MessageHistoryLimit,
 		},
+		Auth: AuthConfig{
+			Enabled: raw.Auth.Enabled, SessionSecret: strings.TrimSpace(raw.Auth.SessionSecret), SessionTTL: sessionTTL,
+			CookieName: strings.TrimSpace(raw.Auth.CookieName), CookieSecure: raw.Auth.CookieSecure,
+		},
+		Note: NoteConfig{Enabled: raw.Note.Enabled, KBID: raw.Note.KBID},
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -346,6 +388,35 @@ func (c Config) Validate() error {
 	}
 	if err := c.Context.Validate(); err != nil {
 		return err
+	}
+	if err := c.Auth.Validate(c.Database.Enabled, c.RAG.Enabled); err != nil {
+		return err
+	}
+	if err := c.Note.Validate(c.Auth.Enabled, c.Database.Enabled, c.RAG.Enabled); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c AuthConfig) Validate(databaseEnabled, ragEnabled bool) error {
+	if !c.Enabled {
+		return nil
+	}
+	if !databaseEnabled || !ragEnabled {
+		return errors.New("AUTH requires DATABASE and RAG to be enabled")
+	}
+	if len(c.SessionSecret) < 32 || c.SessionTTL <= 0 || c.CookieName == "" {
+		return errors.New("AUTH requires SESSION_SECRET of at least 32 characters, positive SESSION_TTL and COOKIE_NAME")
+	}
+	return nil
+}
+
+func (c NoteConfig) Validate(authEnabled, databaseEnabled, ragEnabled bool) error {
+	if !c.Enabled {
+		return nil
+	}
+	if !authEnabled || !databaseEnabled || !ragEnabled || c.KBID == 0 {
+		return errors.New("NOTE requires AUTH, DATABASE, RAG and a positive KB_ID")
 	}
 	return nil
 }
@@ -445,7 +516,8 @@ func defaultFileConfig() fileConfig {
 			StrategyProfile: "default",
 		},
 		Agent: fileAgentConfig{
-			RunTimeout: "90s", ToolTimeout: "15s", MaxIterations: 6,
+			EnableMultiAgent: false,
+			RunTimeout:       "90s", ToolTimeout: "15s", MaxIterations: 6,
 			MaxModelCalls: 3, MaxToolCalls: 3, MaxRepairAttempts: 1, MaxOutputTokens: 2000,
 		},
 		Resilience: fileResilienceConfig{
@@ -463,6 +535,7 @@ func defaultFileConfig() fileConfig {
 		Context: fileContextConfig{
 			MaxInputTokens: 24000, MinRecentMessages: 6, MessageHistoryLimit: 100,
 		},
+		Auth: fileAuthConfig{SessionTTL: "168h", CookieName: "note_agent_session"},
 	}
 }
 
@@ -543,14 +616,28 @@ func applyServiceEnvironment(raw *fileConfig) error {
 		"CIRCUIT_OPEN_TIMEOUT":       &raw.Resilience.CircuitOpenTimeout,
 		"DATABASE_DSN":               &raw.Database.DSN,
 		"DATABASE_CONN_MAX_LIFETIME": &raw.Database.ConnMaxLifetime,
+		"AUTH_SESSION_SECRET":        &raw.Auth.SessionSecret,
+		"AUTH_SESSION_TTL":           &raw.Auth.SessionTTL,
+		"AUTH_COOKIE_NAME":           &raw.Auth.CookieName,
 	})
 	for key, target := range map[string]*bool{
 		"DATABASE_ENABLED":      &raw.Database.Enabled,
 		"DATABASE_AUTO_MIGRATE": &raw.Database.AutoMigrate,
+		"AUTH_ENABLED":          &raw.Auth.Enabled,
+		"AUTH_COOKIE_SECURE":    &raw.Auth.CookieSecure,
+		"NOTE_ENABLED":          &raw.Note.Enabled,
+		"ENABLE_MULTI_AGENT":    &raw.Agent.EnableMultiAgent,
 	} {
 		if err := applyBoolEnvironment(key, target); err != nil {
 			return err
 		}
+	}
+	if value := strings.TrimSpace(os.Getenv("NOTE_KB_ID")); value != "" {
+		kbID, err := strconv.ParseUint(value, 10, 64)
+		if err != nil {
+			return fmt.Errorf("parse NOTE_KB_ID: %w", err)
+		}
+		raw.Note.KBID = kbID
 	}
 	if value := strings.TrimSpace(os.Getenv("RAG_ENABLED")); value != "" {
 		enabled, err := strconv.ParseBool(value)

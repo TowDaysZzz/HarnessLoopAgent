@@ -46,12 +46,14 @@ func NewConfiguredRunner(ctx context.Context, cfg config.Config) (*Runner, error
 	if err != nil {
 		return nil, err
 	}
+	metrics := &agentruntime.Metrics{}
 	return NewRunner(ctx, chatModel, tools, RunnerOptions{
 		RunTimeout: cfg.Agent.RunTimeout, MaxIterations: cfg.Agent.MaxIterations,
 		MaxModelCalls: cfg.Agent.MaxModelCalls, MaxToolCalls: cfg.Agent.MaxToolCalls,
 		MaxRepairAttempts:      cfg.Agent.MaxRepairAttempts,
 		RequireRAGForNoteQuery: cfg.Grounding.RequireRAGForNoteQuery,
-		Observer:               agentruntime.LogObserver{},
+		Observer:               agentruntime.MultiObserver{agentruntime.LogObserver{}, metrics},
+		Metrics:                metrics,
 	})
 }
 

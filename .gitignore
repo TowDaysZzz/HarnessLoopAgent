@@ -5,3 +5,22 @@ config.yaml
 bin/
 coverage.out
 *.log
+
+# React/Vite 前端依赖与构建产物
+web/node_modules/
+web/dist/
+web/.vite/
+web/tsconfig.tsbuildinfo
+
+# 前端本地环境配置；示例配置仍应提交
+web/.env
+web/.env.local
+web/.env.*.local
+
+# 测试和覆盖率产物
+web/coverage/
+web/playwright-report/
+web/test-results/
+
+# 操作系统临时文件
+.DS_Store
