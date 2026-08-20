@@ -128,6 +128,18 @@ func registerChatRoutes(h *server.Hertz, service *chat.Service, authService *age
 		}
 		c.JSON(consts.StatusCreated, session)
 	}))
+	h.GET("/v1/sessions", protect(func(ctx context.Context, c *app.RequestContext) {
+		limit := parsePositiveInt(string(c.Query("limit")), 50)
+		sessions, err := service.ListSessions(ctx, limit)
+		if err != nil {
+			writeServiceError(c, err)
+			return
+		}
+		if sessions == nil {
+			sessions = []chat.Session{}
+		}
+		c.JSON(consts.StatusOK, map[string]any{"items": sessions})
+	}))
 
 	h.GET("/v1/sessions/:session_id", protect(func(ctx context.Context, c *app.RequestContext) {
 		session, err := service.GetSession(ctx, c.Param("session_id"))

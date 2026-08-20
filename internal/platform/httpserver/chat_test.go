@@ -46,6 +46,16 @@ func TestChatHTTPCreateSessionAndRun(t *testing.T) {
 	}
 }
 
+func TestChatHTTPListsSessions(t *testing.T) {
+	service := testChatService(t)
+	server := New("127.0.0.1:0", func() bool { return true }, WithChatService(service))
+	ut.PerformRequest(server.Hertz().Engine, consts.MethodPost, "/v1/sessions", &ut.Body{Body: bytes.NewBufferString(`{"title":"history"}`), Len: -1}, ut.Header{Key: "Content-Type", Value: "application/json"})
+	response := ut.PerformRequest(server.Hertz().Engine, consts.MethodGet, "/v1/sessions?limit=50", nil).Result()
+	if response.StatusCode() != consts.StatusOK || !strings.Contains(string(response.Body()), `"title":"history"`) {
+		t.Fatalf("list sessions status = %d body=%s", response.StatusCode(), response.Body())
+	}
+}
+
 func TestStreamEventsReplaysAfterLastEventID(t *testing.T) {
 	service := testChatService(t)
 	session, _ := service.CreateSession(context.Background(), "notes")

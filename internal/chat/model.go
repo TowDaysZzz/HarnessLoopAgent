@@ -4,10 +4,17 @@ import "time"
 
 type Session struct {
 	ID        string    `json:"id"`
+	UserID    uint64    `json:"-"`
+	TenantID  uint64    `json:"-"`
 	Title     string    `json:"title"`
 	Status    string    `json:"status"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type Owner struct {
+	UserID   uint64
+	TenantID uint64
 }
 
 type Message struct {
@@ -59,6 +66,7 @@ type Event struct {
 
 type CreateRunInput struct {
 	SessionID        string
+	Owner            Owner
 	Content          string
 	Model            string
 	IdempotencyKey   string

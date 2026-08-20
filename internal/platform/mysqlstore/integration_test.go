@@ -29,12 +29,13 @@ func TestIntegrationRepositoryLifecycle(t *testing.T) {
 	}
 
 	now := time.Now().UTC().Truncate(time.Microsecond)
-	session := chat.Session{ID: uuid.NewString(), Title: "integration", Status: "active", CreatedAt: now, UpdatedAt: now}
+	owner := chat.Owner{UserID: 7, TenantID: 9}
+	session := chat.Session{ID: uuid.NewString(), UserID: owner.UserID, TenantID: owner.TenantID, Title: "integration", Status: "active", CreatedAt: now, UpdatedAt: now}
 	if err := store.CreateSession(ctx, session); err != nil {
 		t.Fatalf("CreateSession() error = %v", err)
 	}
 	run := chat.Run{ID: uuid.NewString(), SessionID: session.ID, Status: chat.RunQueued, Model: "test", IdempotencyKey: "integration-key", CreatedAt: now}
-	input := chat.CreateRunInput{SessionID: session.ID, Content: "hello", Model: "test", IdempotencyKey: run.IdempotencyKey}
+	input := chat.CreateRunInput{SessionID: session.ID, Owner: owner, Content: "hello", Model: "test", IdempotencyKey: run.IdempotencyKey}
 	created, err := store.CreateRun(ctx, input, run, chat.Message{ID: uuid.NewString(), SessionID: session.ID, RunID: run.ID, Role: "user", Content: input.Content, CreatedAt: now}, chat.Event{RunID: run.ID, Type: "run.queued", Data: map[string]any{"status": chat.RunQueued}, CreatedAt: now})
 	if err != nil || !created.Created {
 		t.Fatalf("CreateRun() = %#v, %v", created, err)
@@ -52,15 +53,15 @@ func TestIntegrationRepositoryLifecycle(t *testing.T) {
 	if err := store.CompleteRun(ctx, run.ID, chat.Message{ID: uuid.NewString(), SessionID: session.ID, RunID: run.ID, Role: "assistant", Content: "answer", CreatedAt: now}, chat.Event{RunID: run.ID, Type: "run.completed", Data: map[string]any{"status": chat.RunCompleted}, CreatedAt: now}); err != nil {
 		t.Fatalf("CompleteRun() error = %v", err)
 	}
-	stored, err := store.GetRun(ctx, run.ID)
+	stored, err := store.GetRun(ctx, owner, run.ID)
 	if err != nil || stored.Status != chat.RunCompleted {
 		t.Fatalf("GetRun() = %#v, %v", stored, err)
 	}
-	events, err := store.ListEvents(ctx, run.ID, 1, 100)
+	events, err := store.ListEvents(ctx, owner, run.ID, 1, 100)
 	if err != nil || len(events) != 3 || events[0].Sequence != 2 || events[2].Type != "run.completed" {
 		t.Fatalf("ListEvents() = %#v, %v", events, err)
 	}
-	messages, err := store.ListMessages(ctx, session.ID, 100)
+	messages, err := store.ListMessages(ctx, owner, session.ID, 100)
 	if err != nil || len(messages) != 2 || messages[1].Content != "answer" {
 		t.Fatalf("ListMessages() = %#v, %v", messages, err)
 	}

@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/agent"
+	agentauth "github.com/TowDaysZzz/HarnessLoopAgent/internal/auth"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/contextmanager"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/ragclient"
 )
@@ -58,25 +59,34 @@ func (s *Service) CreateSession(ctx context.Context, title string) (Session, err
 		return Session{}, fmt.Errorf("%w: session title is too long", ErrInvalidInput)
 	}
 	now := time.Now().UTC()
-	session := Session{ID: uuid.NewString(), Title: title, Status: "active", CreatedAt: now, UpdatedAt: now}
+	owner := ownerFromContext(ctx)
+	session := Session{ID: uuid.NewString(), UserID: owner.UserID, TenantID: owner.TenantID, Title: title, Status: "active", CreatedAt: now, UpdatedAt: now}
 	if err := s.repo.CreateSession(ctx, session); err != nil {
 		return Session{}, err
 	}
 	return session, nil
 }
 
+func (s *Service) ListSessions(ctx context.Context, limit int) ([]Session, error) {
+	if limit < 1 || limit > 200 {
+		limit = 50
+	}
+	return s.repo.ListSessions(ctx, ownerFromContext(ctx), limit)
+}
+
 func (s *Service) GetSession(ctx context.Context, id string) (Session, error) {
-	return s.repo.GetSession(ctx, id)
+	return s.repo.GetSession(ctx, ownerFromContext(ctx), id)
 }
 
 func (s *Service) ListMessages(ctx context.Context, sessionID string, limit int) ([]Message, error) {
 	if limit < 1 || limit > 500 {
 		limit = 100
 	}
-	return s.repo.ListMessages(ctx, sessionID, limit)
+	return s.repo.ListMessages(ctx, ownerFromContext(ctx), sessionID, limit)
 }
 
 func (s *Service) CreateRun(ctx context.Context, input CreateRunInput) (CreatedRun, error) {
+	input.Owner = ownerFromContext(ctx)
 	input.SessionID = strings.TrimSpace(input.SessionID)
 	input.Content = strings.TrimSpace(input.Content)
 	input.Model = strings.TrimSpace(input.Model)
@@ -112,20 +122,20 @@ func (s *Service) CreateRun(ctx context.Context, input CreateRunInput) (CreatedR
 	}
 	if created.Created {
 		s.notifier.Notify(run.ID)
-		go s.execute(run.ID, input.UserAccessToken, input.KnowledgeBaseIDs)
+		go s.execute(run.ID, input.Owner, input.UserAccessToken, input.KnowledgeBaseIDs)
 	}
 	return created, nil
 }
 
 func (s *Service) GetRun(ctx context.Context, id string) (Run, error) {
-	return s.repo.GetRun(ctx, id)
+	return s.repo.GetRun(ctx, ownerFromContext(ctx), id)
 }
 
 func (s *Service) ListEvents(ctx context.Context, runID string, after int64, limit int) ([]Event, error) {
 	if limit < 1 || limit > 500 {
 		limit = 100
 	}
-	return s.repo.ListEvents(ctx, runID, after, limit)
+	return s.repo.ListEvents(ctx, ownerFromContext(ctx), runID, after, limit)
 }
 
 func (s *Service) Subscribe(runID string) (<-chan struct{}, func()) {
@@ -133,7 +143,7 @@ func (s *Service) Subscribe(runID string) (<-chan struct{}, func()) {
 }
 
 func (s *Service) CancelRun(ctx context.Context, runID string) (Run, error) {
-	run, err := s.repo.CancelRun(ctx, runID, Event{
+	run, err := s.repo.CancelRun(ctx, ownerFromContext(ctx), runID, Event{
 		RunID: runID, Type: "run.cancelled", Data: map[string]any{"status": RunCancelled}, CreatedAt: time.Now().UTC(),
 	})
 	if err != nil {
@@ -149,7 +159,7 @@ func (s *Service) CancelRun(ctx context.Context, runID string) (Run, error) {
 	return run, nil
 }
 
-func (s *Service) execute(runID, userAccessToken string, knowledgeBaseIDs []uint64) {
+func (s *Service) execute(runID string, owner Owner, userAccessToken string, knowledgeBaseIDs []uint64) {
 	ctx, cancel := context.WithCancel(s.root)
 	if strings.TrimSpace(userAccessToken) != "" {
 		ctx = ragclient.WithUserAccessToken(ctx, userAccessToken)
@@ -172,12 +182,12 @@ func (s *Service) execute(runID, userAccessToken string, knowledgeBaseIDs []uint
 		return
 	}
 	s.notifier.Notify(runID)
-	run, err := s.repo.GetRun(ctx, runID)
+	run, err := s.repo.GetRun(ctx, owner, runID)
 	if err != nil {
 		s.fail(runID, RunFailed, "load_run_failed", err)
 		return
 	}
-	messages, err := s.repo.ListMessages(ctx, run.SessionID, s.options.MessageHistoryLimit)
+	messages, err := s.repo.ListMessages(ctx, owner, run.SessionID, s.options.MessageHistoryLimit)
 	if err != nil {
 		s.fail(runID, RunFailed, "load_history_failed", err)
 		return
@@ -250,6 +260,11 @@ func (s *Service) execute(runID, userAccessToken string, knowledgeBaseIDs []uint
 		}
 	}
 	s.fail(runID, RunFailed, "stream_closed", errors.New("agent stream closed without terminal event"))
+}
+
+func ownerFromContext(ctx context.Context) Owner {
+	principal, _ := agentauth.PrincipalFromContext(ctx)
+	return Owner{UserID: principal.UserID, TenantID: principal.TenantID}
 }
 
 func (s *Service) append(runID, eventType string, data map[string]any) (Event, error) {

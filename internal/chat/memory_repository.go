@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"sort"
 	"sync"
 	"time"
 )
@@ -29,20 +30,36 @@ func (r *MemoryRepository) CreateSession(_ context.Context, session Session) err
 	return nil
 }
 
-func (r *MemoryRepository) GetSession(_ context.Context, id string) (Session, error) {
+func (r *MemoryRepository) ListSessions(_ context.Context, owner Owner, limit int) ([]Session, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	result := make([]Session, 0, len(r.sessions))
+	for _, session := range r.sessions {
+		if session.UserID == owner.UserID && session.TenantID == owner.TenantID {
+			result = append(result, session)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].UpdatedAt.After(result[j].UpdatedAt) })
+	if len(result) > limit {
+		result = result[:limit]
+	}
+	return result, nil
+}
+
+func (r *MemoryRepository) GetSession(_ context.Context, owner Owner, id string) (Session, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	session, ok := r.sessions[id]
-	if !ok {
+	if !ok || session.UserID != owner.UserID || session.TenantID != owner.TenantID {
 		return Session{}, ErrNotFound
 	}
 	return session, nil
 }
 
-func (r *MemoryRepository) ListMessages(_ context.Context, sessionID string, limit int) ([]Message, error) {
+func (r *MemoryRepository) ListMessages(_ context.Context, owner Owner, sessionID string, limit int) ([]Message, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, ok := r.sessions[sessionID]; !ok {
+	if session, ok := r.sessions[sessionID]; !ok || session.UserID != owner.UserID || session.TenantID != owner.TenantID {
 		return nil, ErrNotFound
 	}
 	messages := r.messages[sessionID]
@@ -58,6 +75,9 @@ func (r *MemoryRepository) CreateRun(_ context.Context, input CreateRunInput, ru
 	if _, ok := r.sessions[input.SessionID]; !ok {
 		return CreatedRun{}, ErrNotFound
 	}
+	if session := r.sessions[input.SessionID]; session.UserID != input.Owner.UserID || session.TenantID != input.Owner.TenantID {
+		return CreatedRun{}, ErrNotFound
+	}
 	idemKey := input.SessionID + "\x00" + input.IdempotencyKey
 	if existingID, ok := r.idem[idemKey]; ok {
 		return CreatedRun{Run: r.runs[existingID], Created: false}, nil
@@ -69,6 +89,9 @@ func (r *MemoryRepository) CreateRun(_ context.Context, input CreateRunInput, ru
 	}
 	userMessage.Sequence = int64(len(r.messages[input.SessionID]) + 1)
 	r.messages[input.SessionID] = append(r.messages[input.SessionID], userMessage)
+	session := r.sessions[input.SessionID]
+	session.UpdatedAt = userMessage.CreatedAt
+	r.sessions[input.SessionID] = session
 	r.runs[run.ID] = run
 	r.idem[idemKey] = run.ID
 	queued.Sequence = 1
@@ -76,11 +99,15 @@ func (r *MemoryRepository) CreateRun(_ context.Context, input CreateRunInput, ru
 	return CreatedRun{Run: run, Created: true}, nil
 }
 
-func (r *MemoryRepository) GetRun(_ context.Context, id string) (Run, error) {
+func (r *MemoryRepository) GetRun(_ context.Context, owner Owner, id string) (Run, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	run, ok := r.runs[id]
 	if !ok {
+		return Run{}, ErrNotFound
+	}
+	session := r.sessions[run.SessionID]
+	if session.UserID != owner.UserID || session.TenantID != owner.TenantID {
 		return Run{}, ErrNotFound
 	}
 	return run, nil
@@ -148,11 +175,15 @@ func (r *MemoryRepository) FailRun(_ context.Context, runID string, status RunSt
 	return nil
 }
 
-func (r *MemoryRepository) CancelRun(_ context.Context, runID string, event Event) (Run, error) {
+func (r *MemoryRepository) CancelRun(_ context.Context, owner Owner, runID string, event Event) (Run, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	run, ok := r.runs[runID]
 	if !ok {
+		return Run{}, ErrNotFound
+	}
+	session := r.sessions[run.SessionID]
+	if session.UserID != owner.UserID || session.TenantID != owner.TenantID {
 		return Run{}, ErrNotFound
 	}
 	if run.Status.Terminal() {
@@ -165,10 +196,15 @@ func (r *MemoryRepository) CancelRun(_ context.Context, runID string, event Even
 	return run, nil
 }
 
-func (r *MemoryRepository) ListEvents(_ context.Context, runID string, after int64, limit int) ([]Event, error) {
+func (r *MemoryRepository) ListEvents(_ context.Context, owner Owner, runID string, after int64, limit int) ([]Event, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, ok := r.runs[runID]; !ok {
+	run, ok := r.runs[runID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	session := r.sessions[run.SessionID]
+	if session.UserID != owner.UserID || session.TenantID != owner.TenantID {
 		return nil, ErrNotFound
 	}
 	var result []Event

@@ -51,23 +51,42 @@ func Open(ctx context.Context, options Options) (*Store, error) {
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) CreateSession(ctx context.Context, session chat.Session) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO chat_sessions (id, title, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
-		session.ID, session.Title, session.Status, session.CreatedAt, session.UpdatedAt)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO chat_sessions (id, user_id, tenant_id, title, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		session.ID, session.UserID, session.TenantID, session.Title, session.Status, session.CreatedAt, session.UpdatedAt)
 	return err
 }
 
-func (s *Store) GetSession(ctx context.Context, id string) (chat.Session, error) {
+func (s *Store) ListSessions(ctx context.Context, owner chat.Owner, limit int) ([]chat.Session, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, user_id, tenant_id, title, status, created_at, updated_at
+		FROM chat_sessions WHERE user_id = ? AND tenant_id = ? ORDER BY updated_at DESC, id DESC LIMIT ?`, owner.UserID, owner.TenantID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var sessions []chat.Session
+	for rows.Next() {
+		var session chat.Session
+		if err := rows.Scan(&session.ID, &session.UserID, &session.TenantID, &session.Title, &session.Status, &session.CreatedAt, &session.UpdatedAt); err != nil {
+			return nil, err
+		}
+		sessions = append(sessions, session)
+	}
+	return sessions, rows.Err()
+}
+
+func (s *Store) GetSession(ctx context.Context, owner chat.Owner, id string) (chat.Session, error) {
 	var session chat.Session
-	err := s.db.QueryRowContext(ctx, `SELECT id, title, status, created_at, updated_at FROM chat_sessions WHERE id = ?`, id).
-		Scan(&session.ID, &session.Title, &session.Status, &session.CreatedAt, &session.UpdatedAt)
+	err := s.db.QueryRowContext(ctx, `SELECT id, user_id, tenant_id, title, status, created_at, updated_at
+		FROM chat_sessions WHERE id = ? AND user_id = ? AND tenant_id = ?`, id, owner.UserID, owner.TenantID).
+		Scan(&session.ID, &session.UserID, &session.TenantID, &session.Title, &session.Status, &session.CreatedAt, &session.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return chat.Session{}, chat.ErrNotFound
 	}
 	return session, err
 }
 
-func (s *Store) ListMessages(ctx context.Context, sessionID string, limit int) ([]chat.Message, error) {
-	if _, err := s.GetSession(ctx, sessionID); err != nil {
+func (s *Store) ListMessages(ctx context.Context, owner chat.Owner, sessionID string, limit int) ([]chat.Message, error) {
+	if _, err := s.GetSession(ctx, owner, sessionID); err != nil {
 		return nil, err
 	}
 	rows, err := s.db.QueryContext(ctx, `
@@ -98,7 +117,7 @@ func (s *Store) CreateRun(ctx context.Context, input chat.CreateRunInput, run ch
 	}
 	defer tx.Rollback()
 	var sessionID string
-	if err := tx.QueryRowContext(ctx, `SELECT id FROM chat_sessions WHERE id = ? AND status = 'active' FOR UPDATE`, input.SessionID).Scan(&sessionID); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM chat_sessions WHERE id = ? AND user_id = ? AND tenant_id = ? AND status = 'active' FOR UPDATE`, input.SessionID, input.Owner.UserID, input.Owner.TenantID).Scan(&sessionID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return chat.CreatedRun{}, chat.ErrNotFound
 		}
@@ -137,6 +156,9 @@ func (s *Store) CreateRun(ctx context.Context, input chat.CreateRunInput, run ch
 		userMessage.ID, input.SessionID, run.ID, messageSequence, userMessage.Content, userMessage.CreatedAt); err != nil {
 		return chat.CreatedRun{}, err
 	}
+	if _, err := tx.ExecContext(ctx, `UPDATE chat_sessions SET updated_at = ? WHERE id = ?`, userMessage.CreatedAt, input.SessionID); err != nil {
+		return chat.CreatedRun{}, err
+	}
 	queued.Sequence = 1
 	if err := insertEvent(ctx, tx, queued); err != nil {
 		return chat.CreatedRun{}, err
@@ -147,8 +169,8 @@ func (s *Store) CreateRun(ctx context.Context, input chat.CreateRunInput, run ch
 	return chat.CreatedRun{Run: run, Created: true}, nil
 }
 
-func (s *Store) GetRun(ctx context.Context, id string) (chat.Run, error) {
-	return scanRun(s.db.QueryRowContext(ctx, runSelect+` WHERE id = ?`, id))
+func (s *Store) GetRun(ctx context.Context, owner chat.Owner, id string) (chat.Run, error) {
+	return scanRun(s.db.QueryRowContext(ctx, scopedRunSelect+` WHERE r.id = ? AND cs.user_id = ? AND cs.tenant_id = ?`, id, owner.UserID, owner.TenantID))
 }
 
 func (s *Store) StartRun(ctx context.Context, runID string, event chat.Event) error {
@@ -212,7 +234,10 @@ func (s *Store) FailRun(ctx context.Context, runID string, status chat.RunStatus
 	})
 }
 
-func (s *Store) CancelRun(ctx context.Context, runID string, event chat.Event) (chat.Run, error) {
+func (s *Store) CancelRun(ctx context.Context, owner chat.Owner, runID string, event chat.Event) (chat.Run, error) {
+	if _, err := s.GetRun(ctx, owner, runID); err != nil {
+		return chat.Run{}, err
+	}
 	err := s.updateNonTerminalRunWithEvent(ctx, runID, event, func(tx *sql.Tx, sequence int64) error {
 		_, err := tx.ExecContext(ctx, `UPDATE agent_runs SET status = 'cancelled', completed_at = ?, last_event_sequence = ? WHERE id = ?`, event.CreatedAt, sequence, runID)
 		return err
@@ -220,11 +245,11 @@ func (s *Store) CancelRun(ctx context.Context, runID string, event chat.Event) (
 	if err != nil {
 		return chat.Run{}, err
 	}
-	return s.GetRun(ctx, runID)
+	return s.getRun(ctx, runID)
 }
 
-func (s *Store) ListEvents(ctx context.Context, runID string, after int64, limit int) ([]chat.Event, error) {
-	if _, err := s.GetRun(ctx, runID); err != nil {
+func (s *Store) ListEvents(ctx context.Context, owner chat.Owner, runID string, after int64, limit int) ([]chat.Event, error) {
+	if _, err := s.GetRun(ctx, owner, runID); err != nil {
 		return nil, err
 	}
 	rows, err := s.db.QueryContext(ctx, `
@@ -339,6 +364,11 @@ type rowScanner interface {
 }
 
 const runSelect = `SELECT id, session_id, status, model_name, idempotency_key, COALESCE(error_code, ''), COALESCE(error_message, ''), created_at, started_at, completed_at FROM agent_runs`
+const scopedRunSelect = `SELECT r.id, r.session_id, r.status, r.model_name, r.idempotency_key, COALESCE(r.error_code, ''), COALESCE(r.error_message, ''), r.created_at, r.started_at, r.completed_at FROM agent_runs r JOIN chat_sessions cs ON cs.id = r.session_id`
+
+func (s *Store) getRun(ctx context.Context, id string) (chat.Run, error) {
+	return scanRun(s.db.QueryRowContext(ctx, runSelect+` WHERE id = ?`, id))
+}
 
 func scanRun(row rowScanner) (chat.Run, error) {
 	var run chat.Run

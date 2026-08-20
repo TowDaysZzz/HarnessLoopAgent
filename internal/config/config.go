@@ -512,7 +512,7 @@ func defaultFileConfig() fileConfig {
 		ModelTimeout:    "60s",
 		RAG: fileRAGConfig{
 			Timeout:         "10s",
-			TopK:            5,
+			TopK:            8,
 			StrategyProfile: "default",
 		},
 		Agent: fileAgentConfig{

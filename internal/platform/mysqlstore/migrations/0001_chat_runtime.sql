@@ -1,10 +1,13 @@
 CREATE TABLE IF NOT EXISTS chat_sessions (
     id CHAR(36) PRIMARY KEY,
+    user_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    tenant_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
     title VARCHAR(200) NOT NULL,
     status VARCHAR(32) NOT NULL,
     created_at DATETIME(6) NOT NULL,
     updated_at DATETIME(6) NOT NULL,
-    KEY idx_chat_sessions_updated_at (updated_at)
+    KEY idx_chat_sessions_updated_at (updated_at),
+    KEY idx_chat_sessions_owner_updated (tenant_id, user_id, updated_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS agent_runs (

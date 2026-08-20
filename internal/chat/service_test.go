@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/agent"
+	agentauth "github.com/TowDaysZzz/HarnessLoopAgent/internal/auth"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/contextmanager"
 )
 
@@ -147,6 +148,29 @@ func TestNotifierUnsubscribeRemovesWaiter(t *testing.T) {
 	defer notifier.mu.Unlock()
 	if len(notifier.waiters) != 0 {
 		t.Fatalf("waiters = %#v", notifier.waiters)
+	}
+}
+
+func TestServiceListsOnlyCurrentUsersSessions(t *testing.T) {
+	service, _ := newTestService(t, &recordingRunner{})
+	first := agentauth.WithPrincipal(context.Background(), agentauth.Principal{UserID: 1, TenantID: 10})
+	second := agentauth.WithPrincipal(context.Background(), agentauth.Principal{UserID: 2, TenantID: 10})
+	firstSession, err := service.CreateSession(first, "first user's notes")
+	if err != nil {
+		t.Fatalf("CreateSession(first) error = %v", err)
+	}
+	if _, err := service.CreateSession(second, "second user's notes"); err != nil {
+		t.Fatalf("CreateSession(second) error = %v", err)
+	}
+	sessions, err := service.ListSessions(first, 50)
+	if err != nil || len(sessions) != 1 || sessions[0].ID != firstSession.ID {
+		t.Fatalf("ListSessions(first) = %#v, %v", sessions, err)
+	}
+	if _, err := service.GetSession(second, firstSession.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetSession(cross-user) error = %v, want ErrNotFound", err)
+	}
+	if _, err := service.ListMessages(second, firstSession.ID, 100); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("ListMessages(cross-user) error = %v, want ErrNotFound", err)
 	}
 }
 
