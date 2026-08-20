@@ -53,9 +53,13 @@ func NewSemanticSearchNotesTool(retriever ragclient.Retriever, options SemanticS
 			if topK < 1 || topK > 20 {
 				return grounding.Observation{}, errors.New("top_k must be between 1 and 20")
 			}
+			requestKBIDs := ragclient.KnowledgeBaseIDsFromContext(ctx)
+			if len(requestKBIDs) == 0 {
+				requestKBIDs = kbIDs
+			}
 			response, err := retriever.Retrieve(ctx, ragclient.RetrieveRequest{
 				Query:           query,
-				KBIDs:           append([]uint64(nil), kbIDs...),
+				KBIDs:           append([]uint64(nil), requestKBIDs...),
 				TopK:            topK,
 				StrategyProfile: strategyProfile,
 			})

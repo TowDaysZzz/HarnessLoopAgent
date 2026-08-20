@@ -50,7 +50,12 @@ type Service struct {
 	repository Repository
 	rag        RAGClient
 	kbID       uint64
+	resolver   KnowledgeBaseResolver
 	now        func() time.Time
+}
+
+type KnowledgeBaseResolver interface {
+	ResolveKnowledgeBase(context.Context, auth.Principal) (uint64, error)
 }
 
 func NewService(repository Repository, rag RAGClient, kbID uint64) (*Service, error) {
@@ -60,9 +65,27 @@ func NewService(repository Repository, rag RAGClient, kbID uint64) (*Service, er
 	return &Service{repository: repository, rag: rag, kbID: kbID, now: time.Now}, nil
 }
 
+func NewServiceWithResolver(repository Repository, rag RAGClient, resolver KnowledgeBaseResolver) (*Service, error) {
+	if repository == nil || rag == nil || resolver == nil {
+		return nil, errors.New("note repository, RAG client and knowledge base resolver are required")
+	}
+	return &Service{repository: repository, rag: rag, resolver: resolver, now: time.Now}, nil
+}
+
 func (s *Service) Create(ctx context.Context, principal auth.Principal, input CreateInput) (Note, bool, error) {
 	if err := validatePrincipal(principal); err != nil {
 		return Note{}, false, err
+	}
+	kbID := s.kbID
+	if s.resolver != nil {
+		var err error
+		kbID, err = s.resolver.ResolveKnowledgeBase(ctx, principal)
+		if err != nil {
+			return Note{}, false, err
+		}
+	}
+	if kbID == 0 {
+		return Note{}, false, errors.New("personal knowledge base is not configured")
 	}
 	input.Title = strings.Join(strings.Fields(input.Title), " ")
 	input.Content = strings.TrimSpace(input.Content)
@@ -78,7 +101,7 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, input Cr
 	note := Note{
 		ID: noteID, UserID: principal.UserID, TenantID: principal.TenantID,
 		ExternalNoteID: "note-" + strings.ReplaceAll(noteID, "-", ""), Title: input.Title, Content: input.Content,
-		Tags: tags, OccurredAt: input.OccurredAt, Status: StatusIndexing, RAGKBID: s.kbID,
+		Tags: tags, OccurredAt: input.OccurredAt, Status: StatusIndexing, RAGKBID: kbID,
 		ContentHash: hex.EncodeToString(hash[:]), CreatedAt: now, UpdatedAt: now,
 	}
 	event := OutboxEvent{ID: uuid.NewString(), NoteID: note.ID, UserID: principal.UserID, TenantID: principal.TenantID, EventType: eventCreate, CreatedAt: now, AvailableAt: now}

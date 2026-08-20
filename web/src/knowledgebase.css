@@ -1,0 +1,34 @@
+.knowledge-base {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.knowledge-base h2 {
+  margin-bottom: 4px;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: .55;
+}
+
+.note-actions {
+  display: flex;
+  align-items: flex-start;
+  flex: none;
+}
+
+.icon.danger {
+  color: #b42318;
+}
+
+@media (max-width: 760px) {
+  .knowledge-base {
+    grid-column: auto;
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

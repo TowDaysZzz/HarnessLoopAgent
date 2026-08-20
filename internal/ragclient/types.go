@@ -1,5 +1,30 @@
 package ragclient
 
+import "time"
+
+type KnowledgeBase struct {
+	ID          uint64    `json:"id"`
+	TenantID    uint64    `json:"tenant_id"`
+	UserID      uint64    `json:"user_id"`
+	Name        string    `json:"name"`
+	Description string    `json:"description"`
+	Status      string    `json:"status"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+type CreateKnowledgeBaseRequest struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+}
+
+type KnowledgeBaseList struct {
+	Items    []KnowledgeBase `json:"items"`
+	Total    int64           `json:"total"`
+	Page     int             `json:"page"`
+	PageSize int             `json:"page_size"`
+}
+
 type RegisterRequest struct {
 	Email      string `json:"email"`
 	Password   string `json:"password"`

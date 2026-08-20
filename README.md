@@ -57,6 +57,8 @@ NOTE:
 
 认证接口：`POST /v1/auth/register`、`POST /v1/auth/login`、`POST /v1/auth/refresh`、`POST /v1/auth/logout`、`GET /v1/auth/me`。
 
+个人知识库接口：`GET /v1/knowledge-base`、`POST /v1/knowledge-base`。首次使用时调用 `POST`；Agent 会优先绑定该用户在 RAG 中已有的个人知识库，没有时才创建一个。绑定以 `tenant_id + user_id` 唯一保存到 Agent MySQL，笔记写入和 Eino 检索均使用该绑定。重复调用不会为同一 Agent 用户重复创建知识库。
+
 笔记接口：`POST /v1/notes`、`GET /v1/notes`、`GET /v1/notes/{note_id}`、`GET /v1/notes/{note_id}/status`、`DELETE /v1/notes/{note_id}`。创建和删除必须携带 `Idempotency-Key`。笔记原文首先写入 Agent MySQL，再通过 Outbox 投影到 RAG；RAG 任务返回 `pending` 时本地状态保持 `indexing`，不会提前标记为 `indexed`。
 
 创建会话和 Run：
@@ -96,7 +98,7 @@ RAG:
   STRATEGY_PROFILE: "default"
 ```
 
-也可以使用 `RAG_ENABLED`、`RAG_BASE_URL`、`RAG_API_KEY`、`RAG_KB_IDS`、`RAG_TIMEOUT`、`RAG_TOP_K` 和 `RAG_STRATEGY_PROFILE` 覆盖 YAML。`RAG_KB_IDS` 使用逗号分隔，例如 `2,3`。API Key、知识库 ID 和策略不会暴露为模型可填写的 Tool 参数。
+也可以使用 `RAG_ENABLED`、`RAG_BASE_URL`、`RAG_API_KEY`、`RAG_KB_IDS`、`RAG_TIMEOUT`、`RAG_TOP_K` 和 `RAG_STRATEGY_PROFILE` 覆盖 YAML。`RAG_KB_IDS` 使用逗号分隔，例如 `2,3`，只作为 CLI 或未启用用户绑定场景的兼容默认值；已登录 Web 用户始终使用个人知识库绑定。API Key、知识库 ID 和策略不会暴露为模型可填写的 Tool 参数。
 
 ## HarnessRuntime 稳定性
 

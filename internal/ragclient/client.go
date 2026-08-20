@@ -47,6 +47,7 @@ type TraceHeaders struct {
 
 type traceHeadersKey struct{}
 type accessTokenKey struct{}
+type knowledgeBaseIDsKey struct{}
 
 func WithTraceHeaders(ctx context.Context, headers TraceHeaders) context.Context {
 	return context.WithValue(ctx, traceHeadersKey{}, headers)
@@ -56,6 +57,15 @@ func WithTraceHeaders(ctx context.Context, headers TraceHeaders) context.Context
 // It must only be called after the Agent authentication middleware resolved the user session.
 func WithUserAccessToken(ctx context.Context, token string) context.Context {
 	return context.WithValue(ctx, accessTokenKey{}, strings.TrimSpace(token))
+}
+
+func WithKnowledgeBaseIDs(ctx context.Context, ids []uint64) context.Context {
+	return context.WithValue(ctx, knowledgeBaseIDsKey{}, append([]uint64(nil), ids...))
+}
+
+func KnowledgeBaseIDsFromContext(ctx context.Context) []uint64 {
+	ids, _ := ctx.Value(knowledgeBaseIDsKey{}).([]uint64)
+	return append([]uint64(nil), ids...)
 }
 
 func NewClient(config ClientConfig) (*Client, error) {
@@ -108,6 +118,30 @@ func (c *Client) Retrieve(ctx context.Context, request RetrieveRequest) (*Retrie
 	}
 	if result.Items == nil {
 		result.Items = []RetrieveItem{}
+	}
+	return &result, nil
+}
+
+func (c *Client) ListKnowledgeBases(ctx context.Context) (*KnowledgeBaseList, error) {
+	var result KnowledgeBaseList
+	if err := c.doJSON(ctx, consts.MethodGet, "/api/kb/bases?page=1&page_size=100", nil, "user", &result); err != nil {
+		return nil, fmt.Errorf("list RAG knowledge bases: %w", err)
+	}
+	if result.Items == nil {
+		result.Items = []KnowledgeBase{}
+	}
+	return &result, nil
+}
+
+func (c *Client) CreateKnowledgeBase(ctx context.Context, request CreateKnowledgeBaseRequest) (*KnowledgeBase, error) {
+	request.Name = strings.TrimSpace(request.Name)
+	request.Description = strings.TrimSpace(request.Description)
+	if request.Name == "" {
+		return nil, errors.New("knowledge base name is required")
+	}
+	var result KnowledgeBase
+	if err := c.doJSON(ctx, consts.MethodPost, "/api/kb/bases", request, "user", &result); err != nil {
+		return nil, fmt.Errorf("create RAG knowledge base: %w", err)
 	}
 	return &result, nil
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/chat"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/config"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/contextmanager"
+	"github.com/TowDaysZzz/HarnessLoopAgent/internal/knowledgebase"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/mcpfacade"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/note"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/platform/httpserver"
@@ -82,8 +83,13 @@ func run() error {
 			serverOptions = append(serverOptions, httpserver.WithAuthService(authService, httpserver.AuthCookieConfig{
 				Name: cfg.Auth.CookieName, Secure: cfg.Auth.CookieSecure, MaxAge: cfg.Auth.SessionTTL,
 			}))
+			knowledgeBaseService, err := knowledgebase.NewService(store, rag)
+			if err != nil {
+				return err
+			}
+			serverOptions = append(serverOptions, httpserver.WithKnowledgeBaseService(knowledgeBaseService))
 			if cfg.Note.Enabled {
-				noteService, err := note.NewService(store, rag, cfg.Note.KBID)
+				noteService, err := note.NewServiceWithResolver(store, rag, knowledgeBaseService)
 				if err != nil {
 					return err
 				}

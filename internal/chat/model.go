@@ -58,10 +58,12 @@ type Event struct {
 }
 
 type CreateRunInput struct {
-	SessionID      string
-	Content        string
-	Model          string
-	IdempotencyKey string
+	SessionID        string
+	Content          string
+	Model            string
+	IdempotencyKey   string
+	UserAccessToken  string
+	KnowledgeBaseIDs []uint64
 }
 
 type CreatedRun struct {

@@ -129,7 +129,7 @@ func (s *Store) QueueNoteDelete(ctx context.Context, userID, tenantID uint64, no
 	if value.Status == note.StatusDeleted {
 		return value, true, tx.Commit()
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE notes SET status='delete_pending',updated_at=? WHERE id=?`, event.CreatedAt, noteID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE notes SET status='delete_pending',last_error='',updated_at=? WHERE id=?`, event.CreatedAt, noteID); err != nil {
 		return note.Note{}, false, err
 	}
 	if err := insertNoteOutbox(ctx, tx, event, key); err != nil {

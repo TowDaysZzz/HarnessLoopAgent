@@ -87,6 +87,21 @@ func TestSemanticSearchNotesSchemaDoesNotExposeServerConfiguration(t *testing.T)
 	}
 }
 
+func TestSemanticSearchNotesUsesRequestKnowledgeBaseBinding(t *testing.T) {
+	retriever := &recordingRetriever{result: &ragclient.RetrieveResponse{}}
+	searchTool, err := NewSemanticSearchNotesTool(retriever, SemanticSearchNotesOptions{KBIDs: []uint64{2}, DefaultTopK: 5})
+	if err != nil {
+		t.Fatalf("NewSemanticSearchNotesTool() error = %v", err)
+	}
+	ctx := ragclient.WithKnowledgeBaseIDs(context.Background(), []uint64{9})
+	if _, err := searchTool.InvokableRun(ctx, `{"query":"notes"}`); err != nil {
+		t.Fatalf("InvokableRun() error = %v", err)
+	}
+	if len(retriever.request.KBIDs) != 1 || retriever.request.KBIDs[0] != 9 {
+		t.Fatalf("KBIDs = %#v, want user binding [9]", retriever.request.KBIDs)
+	}
+}
+
 func TestSemanticSearchNotesValidatesModelArguments(t *testing.T) {
 	searchTool, err := NewSemanticSearchNotesTool(&recordingRetriever{}, SemanticSearchNotesOptions{KBIDs: []uint64{2}, DefaultTopK: 5})
 	if err != nil {

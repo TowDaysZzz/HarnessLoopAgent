@@ -2,6 +2,7 @@ package einoagent
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -9,12 +10,50 @@ import (
 	"github.com/cloudwego/eino/schema"
 
 	appagent "github.com/TowDaysZzz/HarnessLoopAgent/internal/agent"
+	"github.com/TowDaysZzz/HarnessLoopAgent/internal/grounding"
+	"github.com/TowDaysZzz/HarnessLoopAgent/internal/ragclient"
 )
 
 type fakeStreamingModel struct{}
 
 func (fakeStreamingModel) Generate(context.Context, []*schema.Message, ...model.Option) (*schema.Message, error) {
 	return schema.AssistantMessage("hello world", nil), nil
+}
+
+func TestSummarizeSemanticSearchResultForDisplay(t *testing.T) {
+	items := make([]ragclient.RetrieveItem, 0, 6)
+	for index := 0; index < 6; index++ {
+		items = append(items, ragclient.RetrieveItem{
+			Content: strings.Repeat("笔", 321), Score: 0.9,
+			Citation: ragclient.Citation{KBID: 6, DocumentID: 12, ChunkID: "chunk-1", FileName: "note.md", ChunkIndex: index},
+			Source:   ragclient.Source{Collection: "must-not-leak"},
+		})
+	}
+	encoded := summarizeToolResult("semantic_search_notes", grounding.Observation{Usable: true, RequestID: "req-1", Items: items}, "raw")
+	var result struct {
+		Usable    bool `json:"usable"`
+		ItemCount int  `json:"item_count"`
+		Items     []struct {
+			Content  string             `json:"content"`
+			Score    float64            `json:"score"`
+			Citation ragclient.Citation `json:"citation"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal([]byte(encoded), &result); err != nil {
+		t.Fatalf("summary is invalid JSON: %v", err)
+	}
+	if !result.Usable || result.ItemCount != 6 || len(result.Items) != 5 {
+		t.Fatalf("unexpected summary: %#v", result)
+	}
+	if got := len([]rune(result.Items[0].Content)); got != 323 {
+		t.Fatalf("truncated content rune count = %d, want 323", got)
+	}
+	if result.Items[0].Citation.FileName != "note.md" || result.Items[0].Citation.ChunkID != "chunk-1" || result.Items[0].Score != 0.9 {
+		t.Fatalf("display fields missing: %#v", result.Items[0])
+	}
+	if strings.Contains(encoded, "must-not-leak") || strings.Contains(encoded, "collection") {
+		t.Fatalf("internal source metadata leaked: %s", encoded)
+	}
 }
 
 func (fakeStreamingModel) Stream(context.Context, []*schema.Message, ...model.Option) (*schema.StreamReader[*schema.Message], error) {

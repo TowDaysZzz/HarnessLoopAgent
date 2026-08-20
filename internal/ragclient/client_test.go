@@ -133,6 +133,40 @@ func TestUserNoteAPIsRequireAndForwardAccessToken(t *testing.T) {
 	}
 }
 
+func TestKnowledgeBaseAPIsUseUserToken(t *testing.T) {
+	calls := 0
+	client := newTestClient(t, doerFunc(func(_ context.Context, request *protocol.Request, response *protocol.Response) error {
+		calls++
+		if got := request.Header.Get("Authorization"); got != "Bearer user-jwt" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		switch calls {
+		case 1:
+			if !strings.Contains(string(request.URI().Path()), "/api/kb/bases") {
+				t.Fatalf("list path = %s", request.URI().Path())
+			}
+			response.SetStatusCode(200)
+			response.SetBodyString(`{"code":200,"message":"Success","data":{"items":[],"total":0,"page":1,"page_size":100}}`)
+		case 2:
+			if !strings.Contains(string(request.Body()), `"name":"我的笔记"`) {
+				t.Fatalf("create body = %s", request.Body())
+			}
+			response.SetStatusCode(200)
+			response.SetBodyString(`{"code":200,"message":"Success","data":{"id":9,"tenant_id":4,"user_id":3,"name":"我的笔记","status":"active"}}`)
+		}
+		return nil
+	}))
+	ctx := WithUserAccessToken(context.Background(), "user-jwt")
+	listed, err := client.ListKnowledgeBases(ctx)
+	if err != nil || listed.Total != 0 || listed.Items == nil {
+		t.Fatalf("ListKnowledgeBases() = %#v, %v", listed, err)
+	}
+	created, err := client.CreateKnowledgeBase(ctx, CreateKnowledgeBaseRequest{Name: "我的笔记"})
+	if err != nil || created.ID != 9 || created.UserID != 3 {
+		t.Fatalf("CreateKnowledgeBase() = %#v, %v", created, err)
+	}
+}
+
 func TestAuthAPIsDoNotSendStaticAPIKey(t *testing.T) {
 	client := newTestClient(t, doerFunc(func(_ context.Context, request *protocol.Request, response *protocol.Response) error {
 		if got := request.Header.Get("Authorization"); got != "" {

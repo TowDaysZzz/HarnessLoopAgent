@@ -12,6 +12,7 @@ import (
 
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/agent"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/contextmanager"
+	"github.com/TowDaysZzz/HarnessLoopAgent/internal/ragclient"
 )
 
 type ServiceOptions struct {
@@ -111,7 +112,7 @@ func (s *Service) CreateRun(ctx context.Context, input CreateRunInput) (CreatedR
 	}
 	if created.Created {
 		s.notifier.Notify(run.ID)
-		go s.execute(run.ID)
+		go s.execute(run.ID, input.UserAccessToken, input.KnowledgeBaseIDs)
 	}
 	return created, nil
 }
@@ -148,8 +149,14 @@ func (s *Service) CancelRun(ctx context.Context, runID string) (Run, error) {
 	return run, nil
 }
 
-func (s *Service) execute(runID string) {
+func (s *Service) execute(runID, userAccessToken string, knowledgeBaseIDs []uint64) {
 	ctx, cancel := context.WithCancel(s.root)
+	if strings.TrimSpace(userAccessToken) != "" {
+		ctx = ragclient.WithUserAccessToken(ctx, userAccessToken)
+	}
+	if len(knowledgeBaseIDs) > 0 {
+		ctx = ragclient.WithKnowledgeBaseIDs(ctx, knowledgeBaseIDs)
+	}
 	s.mu.Lock()
 	s.cancels[runID] = cancel
 	s.mu.Unlock()

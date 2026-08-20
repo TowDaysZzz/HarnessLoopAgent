@@ -9,7 +9,7 @@
 
 ## 决策
 
-Agent 使用 Hertz Client 调用 RAG 服务的 `POST /v1/retrieve`。请求由 Agent 服务端补充知识库 ID、策略和 Bearer API Key；模型只能为 Eino Tool `semantic_search_notes` 提供以下参数：
+Agent 使用 Hertz Client 调用 RAG 服务的 `POST /v1/retrieve`。请求由 Agent 服务端根据当前认证用户的个人知识库绑定补充知识库 ID，并透传该用户的 RAG JWT；模型只能为 Eino Tool `semantic_search_notes` 提供以下参数：
 
 ```json
 {
@@ -28,11 +28,12 @@ Agent 使用强类型结构解析统一响应 envelope，并向模型保留 `req
 
 ## 安全边界
 
-- RAG API Key 只来自 YAML、环境变量或密钥管理系统，不写入日志和 Tool schema。
+- Web 用户访问 RAG 时使用服务端解析出的用户 JWT；静态 RAG API Key 只用于明确配置的非用户调用，不写入日志和 Tool schema。
 - 知识库 ID 由 Agent 服务端按当前用户或租户注入，模型不能覆盖。
 - RAG 服务仍负责 API Key、tenant 和知识库权限校验。
 - Agent 不直接连接 Milvus，也不复用 RAG 内部 repository。
-- 当前开发知识库只用于联调；个人笔记上线前仍需完成 subject/user 级隔离。
+- Agent MySQL 只保存 `tenant_id + user_id -> rag_kb_id` 绑定，RAG 仍是知识库和权限事实来源。
+- 新增笔记、删除投影和对话检索必须解析同一份个人知识库绑定。
 
 ## 失败语义
 

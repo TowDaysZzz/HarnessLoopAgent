@@ -280,7 +280,39 @@ func summarizeToolResult(toolName string, observation grounding.Observation, raw
 	if toolName != "semantic_search_notes" {
 		return raw
 	}
-	result := map[string]any{"usable": observation.Usable, "reason": observation.Reason, "request_id": observation.RequestID, "item_count": len(observation.Items)}
+	type displayCitation struct {
+		KBID       uint64 `json:"kb_id"`
+		DocumentID uint64 `json:"document_id"`
+		ChunkID    string `json:"chunk_id"`
+		FileName   string `json:"file_name"`
+		ChunkIndex int    `json:"chunk_index"`
+	}
+	type displayItem struct {
+		Content  string          `json:"content"`
+		Score    float64         `json:"score"`
+		Citation displayCitation `json:"citation"`
+	}
+	items := make([]displayItem, 0, min(len(observation.Items), 5))
+	for _, item := range observation.Items {
+		content := []rune(strings.TrimSpace(item.Content))
+		if len(content) > 320 {
+			content = append(content[:320], []rune("...")...)
+		}
+		items = append(items, displayItem{
+			Content: string(content), Score: item.Score,
+			Citation: displayCitation{
+				KBID: item.Citation.KBID, DocumentID: item.Citation.DocumentID,
+				ChunkID: item.Citation.ChunkID, FileName: item.Citation.FileName, ChunkIndex: item.Citation.ChunkIndex,
+			},
+		})
+		if len(items) == 5 {
+			break
+		}
+	}
+	result := map[string]any{
+		"usable": observation.Usable, "reason": observation.Reason,
+		"request_id": observation.RequestID, "item_count": len(observation.Items), "items": items,
+	}
 	encoded, _ := json.Marshal(result)
 	return string(encoded)
 }

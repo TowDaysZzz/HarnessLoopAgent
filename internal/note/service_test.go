@@ -54,7 +54,16 @@ func (f *noteRepositoryFake) FailNoteProjection(context.Context, OutboxEvent, st
 	return nil
 }
 
-type noteRAGFake struct{ jobStatus string }
+type noteRAGFake struct {
+	jobStatus   string
+	deleteCalls int
+}
+
+type noteKBResolver uint64
+
+func (r noteKBResolver) ResolveKnowledgeBase(context.Context, auth.Principal) (uint64, error) {
+	return uint64(r), nil
+}
 
 func (f *noteRAGFake) CreateNote(context.Context, ragclient.CreateNoteRequest) (*ragclient.CreateNoteResponse, error) {
 	return &ragclient.CreateNoteResponse{DocumentID: 10, JobID: 20, ExternalNoteID: "external", Status: "pending"}, nil
@@ -63,6 +72,7 @@ func (f *noteRAGFake) GetNoteJob(context.Context, uint64) (*ragclient.NoteJobRes
 	return &ragclient.NoteJobResponse{JobID: 20, DocumentID: 10, Status: f.jobStatus}, nil
 }
 func (f *noteRAGFake) DeleteNote(context.Context, uint64, string) (*ragclient.DeleteNoteResponse, error) {
+	f.deleteCalls++
 	return &ragclient.DeleteNoteResponse{DocumentID: 10, Deleted: true}, nil
 }
 
@@ -87,5 +97,40 @@ func TestCreateProjectsPendingAndOnlyJobCompletionMarksIndexed(t *testing.T) {
 	refreshed, err := service.RefreshStatus(context.Background(), principal, created.ID)
 	if err != nil || refreshed.Status != StatusIndexed {
 		t.Fatalf("RefreshStatus() = %#v, %v", refreshed, err)
+	}
+}
+
+func TestCreateUsesPersonalKnowledgeBaseBinding(t *testing.T) {
+	repository := &noteRepositoryFake{}
+	service, err := NewServiceWithResolver(repository, &noteRAGFake{}, noteKBResolver(9))
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, _, err := service.Create(context.Background(), auth.Principal{UserID: 3, TenantID: 4}, CreateInput{Title: "note", Content: "content", IdempotencyKey: "key"})
+	if err != nil || created.RAGKBID != 9 {
+		t.Fatalf("Create() = %#v, %v", created, err)
+	}
+}
+
+func TestDeleteProjectsToRAGBeforeMarkingDeleted(t *testing.T) {
+	repository := &noteRepositoryFake{note: Note{ID: "note-1", UserID: 3, TenantID: 4, RAGKBID: 9, RAGDocumentID: 10, Status: StatusIndexed}}
+	rag := &noteRAGFake{}
+	service, err := NewService(repository, rag, 9)
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal := auth.Principal{UserID: 3, TenantID: 4, AccessToken: "jwt"}
+	queued, replayed, err := service.Delete(context.Background(), principal, "note-1", "delete-1")
+	if err != nil || replayed || queued.Status != StatusDeletePending || repository.note.Status != StatusDeletePending {
+		t.Fatalf("Delete() = %#v, replayed=%v, err=%v", queued, replayed, err)
+	}
+	if rag.deleteCalls != 0 {
+		t.Fatal("RAG deletion ran before outbox projection")
+	}
+	if err := service.ProjectPending(context.Background(), principal, 5); err != nil {
+		t.Fatalf("ProjectPending() error = %v", err)
+	}
+	if rag.deleteCalls != 1 || repository.note.Status != StatusDeleted {
+		t.Fatalf("deleteCalls=%d note=%#v", rag.deleteCalls, repository.note)
 	}
 }

@@ -16,6 +16,7 @@ import (
 
 	agentauth "github.com/TowDaysZzz/HarnessLoopAgent/internal/auth"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/chat"
+	"github.com/TowDaysZzz/HarnessLoopAgent/internal/knowledgebase"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/mcpfacade"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/note"
 )
@@ -27,11 +28,12 @@ type Server struct {
 type Option func(*serverOptions)
 
 type serverOptions struct {
-	chat       *chat.Service
-	auth       *agentauth.Service
-	note       *note.Service
-	mcp        *mcpfacade.Facade
-	authCookie AuthCookieConfig
+	chat          *chat.Service
+	auth          *agentauth.Service
+	note          *note.Service
+	mcp           *mcpfacade.Facade
+	knowledgeBase *knowledgebase.Service
+	authCookie    AuthCookieConfig
 }
 
 type AuthCookieConfig struct {
@@ -59,6 +61,10 @@ func WithMCPFacade(facade *mcpfacade.Facade) Option {
 	return func(options *serverOptions) { options.mcp = facade }
 }
 
+func WithKnowledgeBaseService(service *knowledgebase.Service) Option {
+	return func(options *serverOptions) { options.knowledgeBase = service }
+}
+
 func New(addr string, ready func() bool, options ...Option) *Server {
 	var configured serverOptions
 	for _, option := range options {
@@ -73,10 +79,13 @@ func New(addr string, ready func() bool, options ...Option) *Server {
 		c.JSON(consts.StatusOK, map[string]string{"status": "ok"})
 	})
 	if configured.chat != nil {
-		registerChatRoutes(h, configured.chat)
+		registerChatRoutes(h, configured.chat, configured.auth, configured.authCookie, configured.knowledgeBase)
 	}
 	if configured.auth != nil {
 		registerAuthRoutes(h, configured.auth, configured.authCookie)
+		if configured.knowledgeBase != nil {
+			registerKnowledgeBaseRoutes(h, configured.auth, configured.knowledgeBase, configured.authCookie)
+		}
 		if configured.note != nil {
 			registerNoteRoutes(h, configured.auth, configured.note, configured.authCookie)
 		}
@@ -95,8 +104,14 @@ func New(addr string, ready func() bool, options ...Option) *Server {
 	return &Server{hertz: h}
 }
 
-func registerChatRoutes(h *server.Hertz, service *chat.Service) {
-	h.POST("/v1/sessions", func(ctx context.Context, c *app.RequestContext) {
+func registerChatRoutes(h *server.Hertz, service *chat.Service, authService *agentauth.Service, cookie AuthCookieConfig, knowledgeBaseService *knowledgebase.Service) {
+	protect := func(handler app.HandlerFunc) app.HandlerFunc {
+		if authService == nil {
+			return handler
+		}
+		return authenticated(authService, cookie, handler)
+	}
+	h.POST("/v1/sessions", protect(func(ctx context.Context, c *app.RequestContext) {
 		var request struct {
 			Title string `json:"title"`
 		}
@@ -112,18 +127,18 @@ func registerChatRoutes(h *server.Hertz, service *chat.Service) {
 			return
 		}
 		c.JSON(consts.StatusCreated, session)
-	})
+	}))
 
-	h.GET("/v1/sessions/:session_id", func(ctx context.Context, c *app.RequestContext) {
+	h.GET("/v1/sessions/:session_id", protect(func(ctx context.Context, c *app.RequestContext) {
 		session, err := service.GetSession(ctx, c.Param("session_id"))
 		if err != nil {
 			writeServiceError(c, err)
 			return
 		}
 		c.JSON(consts.StatusOK, session)
-	})
+	}))
 
-	h.GET("/v1/sessions/:session_id/messages", func(ctx context.Context, c *app.RequestContext) {
+	h.GET("/v1/sessions/:session_id/messages", protect(func(ctx context.Context, c *app.RequestContext) {
 		limit := parsePositiveInt(string(c.Query("limit")), 100)
 		messages, err := service.ListMessages(ctx, c.Param("session_id"), limit)
 		if err != nil {
@@ -131,9 +146,9 @@ func registerChatRoutes(h *server.Hertz, service *chat.Service) {
 			return
 		}
 		c.JSON(consts.StatusOK, map[string]any{"items": messages})
-	})
+	}))
 
-	h.POST("/v1/sessions/:session_id/runs", func(ctx context.Context, c *app.RequestContext) {
+	h.POST("/v1/sessions/:session_id/runs", protect(func(ctx context.Context, c *app.RequestContext) {
 		var request struct {
 			Message string `json:"message"`
 			Model   string `json:"model"`
@@ -142,9 +157,23 @@ func registerChatRoutes(h *server.Hertz, service *chat.Service) {
 			writeError(c, consts.StatusBadRequest, "invalid_json", "请求体必须是合法 JSON")
 			return
 		}
+		principal, _ := agentauth.PrincipalFromContext(ctx)
+		var knowledgeBaseIDs []uint64
+		if knowledgeBaseService != nil {
+			binding, bindingErr := knowledgeBaseService.Get(ctx, principal)
+			if bindingErr != nil {
+				if errors.Is(bindingErr, knowledgebase.ErrNotConfigured) {
+					writeError(c, consts.StatusConflict, "knowledge_base_required", "请先创建并绑定个人知识库")
+					return
+				}
+				writeServiceError(c, bindingErr)
+				return
+			}
+			knowledgeBaseIDs = []uint64{binding.RAGKBID}
+		}
 		created, err := service.CreateRun(ctx, chat.CreateRunInput{
 			SessionID: c.Param("session_id"), Content: request.Message, Model: request.Model,
-			IdempotencyKey: string(c.GetHeader("Idempotency-Key")),
+			IdempotencyKey: string(c.GetHeader("Idempotency-Key")), UserAccessToken: principal.AccessToken, KnowledgeBaseIDs: knowledgeBaseIDs,
 		})
 		if err != nil {
 			writeServiceError(c, err)
@@ -159,27 +188,27 @@ func registerChatRoutes(h *server.Hertz, service *chat.Service) {
 			"events_url":        "/v1/runs/" + created.Run.ID + "/events",
 			"idempotent_replay": !created.Created,
 		})
-	})
+	}))
 
-	h.GET("/v1/runs/:run_id", func(ctx context.Context, c *app.RequestContext) {
+	h.GET("/v1/runs/:run_id", protect(func(ctx context.Context, c *app.RequestContext) {
 		run, err := service.GetRun(ctx, c.Param("run_id"))
 		if err != nil {
 			writeServiceError(c, err)
 			return
 		}
 		c.JSON(consts.StatusOK, run)
-	})
+	}))
 
-	h.POST("/v1/runs/:run_id/cancel", func(ctx context.Context, c *app.RequestContext) {
+	h.POST("/v1/runs/:run_id/cancel", protect(func(ctx context.Context, c *app.RequestContext) {
 		run, err := service.CancelRun(ctx, c.Param("run_id"))
 		if err != nil {
 			writeServiceError(c, err)
 			return
 		}
 		c.JSON(consts.StatusOK, run)
-	})
+	}))
 
-	h.GET("/v1/runs/:run_id/events", func(ctx context.Context, c *app.RequestContext) {
+	h.GET("/v1/runs/:run_id/events", protect(func(ctx context.Context, c *app.RequestContext) {
 		runID := c.Param("run_id")
 		if _, err := service.GetRun(ctx, runID); err != nil {
 			writeServiceError(c, err)
@@ -196,7 +225,7 @@ func registerChatRoutes(h *server.Hertz, service *chat.Service) {
 		c.Response.Header.Set("X-Accel-Buffering", "no")
 		c.Response.SetBodyStream(reader, -1)
 		go streamEvents(ctx, writer, service, runID, after)
-	})
+	}))
 }
 
 func streamEvents(ctx context.Context, writer *io.PipeWriter, service *chat.Service, runID string, after int64) {

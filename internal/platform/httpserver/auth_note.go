@@ -14,6 +14,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 
 	agentauth "github.com/TowDaysZzz/HarnessLoopAgent/internal/auth"
+	"github.com/TowDaysZzz/HarnessLoopAgent/internal/knowledgebase"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/note"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/ragclient"
 )
@@ -111,7 +112,9 @@ func registerNoteRoutes(h *server.Hertz, authService *agentauth.Service, service
 			return
 		}
 		dispatchProjection(service, principal)
-		c.JSON(consts.StatusAccepted, map[string]any{"note": value, "idempotent_replay": replayed})
+		statusURL := "/v1/notes/" + value.ID + "/status"
+		c.Response.Header.Set("Location", statusURL)
+		c.JSON(consts.StatusAccepted, map[string]any{"note": value, "status_url": statusURL, "idempotent_replay": replayed})
 	}))
 }
 
@@ -192,6 +195,10 @@ func writeAuthError(c *app.RequestContext, err error) {
 }
 
 func writeNoteError(c *app.RequestContext, err error) {
+	if errors.Is(err, knowledgebase.ErrNotConfigured) {
+		writeError(c, consts.StatusConflict, "knowledge_base_required", "请先创建并绑定个人知识库")
+		return
+	}
 	var apiErr *ragclient.APIError
 	switch {
 	case errors.Is(err, note.ErrNotFound):
