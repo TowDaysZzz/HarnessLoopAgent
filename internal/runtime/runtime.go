@@ -32,12 +32,22 @@ type State struct {
 }
 
 type stateKey struct{}
+type requestedRunIDKey struct{}
+
+// WithRunID correlates runtime/model/tool observations with the persisted HTTP run.
+func WithRunID(ctx context.Context, runID string) context.Context {
+	return context.WithValue(ctx, requestedRunIDKey{}, runID)
+}
 
 func Start(ctx context.Context, budget Budget, observer Observer) (context.Context, context.CancelFunc, *State) {
 	if observer == nil {
 		observer = NoopObserver{}
 	}
-	state := &State{RunID: newRunID(), budget: budget, observer: observer}
+	runID, _ := ctx.Value(requestedRunIDKey{}).(string)
+	if runID == "" {
+		runID = newRunID()
+	}
+	state := &State{RunID: runID, budget: budget, observer: observer}
 	if budget.RunTimeout > 0 {
 		ctx, cancel := context.WithTimeout(ctx, budget.RunTimeout)
 		ctx = context.WithValue(ctx, stateKey{}, state)

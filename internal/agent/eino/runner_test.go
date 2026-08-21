@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
@@ -86,6 +87,31 @@ func TestRunnerConsumesStreamingModelOutput(t *testing.T) {
 	}
 	if !completed {
 		t.Fatal("run did not emit completion event")
+	}
+}
+
+func TestEmitTerminalWaitsForSlowConsumer(t *testing.T) {
+	out := make(chan appagent.Event)
+	done := make(chan struct{})
+	go func() {
+		emitTerminal(out, appagent.Event{Type: appagent.EventRunCompleted})
+		close(done)
+	}()
+
+	// This is deliberately longer than the former 100ms best-effort timeout.
+	time.Sleep(150 * time.Millisecond)
+	select {
+	case event := <-out:
+		if event.Type != appagent.EventRunCompleted {
+			t.Fatalf("terminal event = %s", event.Type)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("terminal event was not delivered")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("terminal sender did not return")
 	}
 }
 

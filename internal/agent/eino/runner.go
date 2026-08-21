@@ -76,7 +76,9 @@ func (r *Runner) Stream(ctx context.Context, prompt string) <-chan appagent.Even
 }
 
 func (r *Runner) StreamMessages(ctx context.Context, messages []appagent.Message) <-chan appagent.Event {
-	out := make(chan appagent.Event)
+	// Keep one slot reserved so the terminal event cannot be lost when the
+	// consumer is briefly slower than the model stream.
+	out := make(chan appagent.Event, 1)
 	schemaMessages, prompt, err := toSchemaMessages(messages)
 	if err != nil {
 		close(out)
@@ -344,8 +346,5 @@ func emit(ctx context.Context, out chan<- appagent.Event, event appagent.Event) 
 }
 
 func emitTerminal(out chan<- appagent.Event, event appagent.Event) {
-	select {
-	case out <- event:
-	case <-time.After(100 * time.Millisecond):
-	}
+	out <- event
 }

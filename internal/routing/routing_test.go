@@ -22,6 +22,8 @@ func TestClassifierRoutesIntentAndComplexityIndependently(t *testing.T) {
 		{name: "specified CLI note query", input: "请查询我之前关于垃圾回收的记录，只根据检索结果回答，并给出来源", intent: IntentNoteQuery, complexity: ComplexitySimple, needsRAG: true},
 		{name: "complex note query", input: "综合我之前的记录，比较并分析其中的垃圾回收方案", intent: IntentNoteQuery, complexity: ComplexityComplex, needsRAG: true},
 		{name: "note create", input: "帮我记住：我偏好简洁回答", intent: IntentNoteCreate, complexity: ComplexitySimple},
+		{name: "history summary write from UI case", input: "从历史记录总结一条笔记并记录", intent: IntentNoteCreate, complexity: ComplexitySimple},
+		{name: "conversation summary write", input: "把当前对话整理成一条笔记", intent: IntentNoteCreate, complexity: ComplexitySimple},
 		{name: "note delete", input: "删除这条笔记", intent: IntentNoteDelete, complexity: ComplexitySimple},
 		{name: "unclear", input: "  ", intent: IntentUnclear, complexity: ComplexitySimple},
 	}
@@ -32,6 +34,31 @@ func TestClassifierRoutesIntentAndComplexityIndependently(t *testing.T) {
 				t.Fatalf("Classify() = %#v", got)
 			}
 		})
+	}
+}
+
+func TestClassifierSeparatesHistorySummaryWriteFromHistoryQuery(t *testing.T) {
+	c := Classifier{MinWriteConfidence: .95}
+	writeCases := []string{
+		"从历史记录总结一条笔记并记录",
+		"把聊天历史整理成笔记",
+		"请归纳本次对话并保存为笔记",
+	}
+	for _, input := range writeCases {
+		got := c.Classify(input)
+		if got.Intent != IntentNoteCreate || !got.NeedsModel || got.NeedsRAG || got.Reason != "history_summary_write" {
+			t.Fatalf("Classify(%q) = %#v", input, got)
+		}
+	}
+	queryCases := []string{
+		"查询我的历史记录",
+		"总结历史记录里关于 Go GC 的内容",
+	}
+	for _, input := range queryCases {
+		got := c.Classify(input)
+		if got.Intent != IntentNoteQuery || !got.NeedsRAG {
+			t.Fatalf("Classify(%q) = %#v", input, got)
+		}
 	}
 }
 

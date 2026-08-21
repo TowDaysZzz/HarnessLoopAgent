@@ -43,3 +43,15 @@ func TestRunBudgetAndObserver(t *testing.T) {
 		t.Fatalf("events = %#v", observer.events)
 	}
 }
+
+func TestStartUsesRequestedRunID(t *testing.T) {
+	ctx := WithRunID(context.Background(), "http-run-123")
+	ctx, cancel, state := Start(ctx, Budget{}, NoopObserver{})
+	defer cancel()
+	if state.RunID != "http-run-123" {
+		t.Fatalf("run ID = %q", state.RunID)
+	}
+	if StateFrom(ctx).RunID != "http-run-123" {
+		t.Fatal("requested run ID was not attached to runtime context")
+	}
+}

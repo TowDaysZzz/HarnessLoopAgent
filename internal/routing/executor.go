@@ -136,15 +136,29 @@ func (h ConversationHandler) Stream(ctx context.Context, input Input) <-chan age
 	}
 	bounded, cancel := context.WithTimeout(ctx, h.Timeout)
 	source := h.Runner.StreamMessages(bounded, input.Messages)
-	out := make(chan agent.Event)
+	// The buffer guarantees that a synthesized terminal event can be delivered
+	// even if the HTTP/SSE consumer is momentarily back-pressured.
+	out := make(chan agent.Event, 1)
 	go func() {
 		defer close(out)
 		defer cancel()
+		terminalObserved := false
 		for event := range source {
+			if event.Type == agent.EventRunCompleted || event.Type == agent.EventRunFailed {
+				terminalObserved = true
+			}
 			if !emitAgentEvent(ctx, out, event) {
 				return
 			}
 		}
+		if terminalObserved || ctx.Err() != nil {
+			return
+		}
+		err := bounded.Err()
+		if err == nil {
+			err = errors.New("conversation runner closed without a terminal event")
+		}
+		out <- agent.Event{Type: agent.EventRunFailed, Err: err}
 	}()
 	return out
 }

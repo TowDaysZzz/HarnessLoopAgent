@@ -111,6 +111,29 @@ func TestConversationHandlerPassesBoundedMessages(t *testing.T) {
 	}
 }
 
+type closingConversationRunner struct{}
+
+func (closingConversationRunner) StreamMessages(context.Context, []agent.Message) <-chan agent.Event {
+	out := make(chan agent.Event)
+	close(out)
+	return out
+}
+
+func TestConversationHandlerSynthesizesFailureWhenSourceHasNoTerminalEvent(t *testing.T) {
+	handler := ConversationHandler{Runner: closingConversationRunner{}, Timeout: time.Second}
+	events := handler.Stream(context.Background(), Input{Messages: []agent.Message{{Role: "user", Content: "hello"}}})
+	event, ok := <-events
+	if !ok {
+		t.Fatal("stream closed without synthesized failure")
+	}
+	if event.Type != agent.EventRunFailed || event.Err == nil {
+		t.Fatalf("event = %#v", event)
+	}
+	if _, open := <-events; open {
+		t.Fatal("stream remained open after terminal event")
+	}
+}
+
 type conversationRunnerAdapter struct{ handler *fakeStreamingHandler }
 
 func (a conversationRunnerAdapter) StreamMessages(ctx context.Context, messages []agent.Message) <-chan agent.Event {

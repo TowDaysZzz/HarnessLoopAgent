@@ -101,7 +101,7 @@ func newTestService(t *testing.T, runner *recordingRunner) (*Service, *MemoryRep
 	return service, repo
 }
 
-func newRoutedTestService(t *testing.T, runner *recordingRunner, router *fakeIntentRouter, executor *fakeIntentExecutor, fallback bool) (*Service, *MemoryRepository) {
+func newRoutedTestService(t *testing.T, runner *recordingRunner, router IntentRouter, executor *fakeIntentExecutor, fallback bool) (*Service, *MemoryRepository) {
 	t.Helper()
 	repo := NewMemoryRepository()
 	service, err := NewService(context.Background(), repo, runner, contextmanager.NewBoundedAssembler(1000, 2, contextmanager.ApproxTokenCounter{}), ServiceOptions{
@@ -112,6 +112,41 @@ func newRoutedTestService(t *testing.T, runner *recordingRunner, router *fakeInt
 		t.Fatalf("NewService() error = %v", err)
 	}
 	return service, repo
+}
+
+func TestServiceRoutesHistorySummaryUIPhraseToDraftCandidate(t *testing.T) {
+	executor := &fakeIntentExecutor{events: []agent.Event{
+		{Type: agent.EventDraftCandidate, Delta: `{"id":"draft-ui","title":"对话摘要","content":"摘要正文","content_hash":"hash-ui","expires_at":"2026-08-22T10:00:00Z"}`},
+		{Type: agent.EventTextDelta, Delta: "我整理了一条待确认笔记。"},
+		{Type: agent.EventRunCompleted},
+	}}
+	service, _ := newRoutedTestService(t, &recordingRunner{}, routing.Router{Classifier: routing.Classifier{MinWriteConfidence: .95}}, executor, false)
+	ctx := agentauth.WithPrincipal(context.Background(), agentauth.Principal{UserID: 7, TenantID: 9})
+	session, _ := service.CreateSession(ctx, "UI case")
+	created, err := service.CreateRun(ctx, CreateRunInput{
+		SessionID: session.ID, Content: "从历史记录总结一条笔记并记录", IdempotencyKey: "history-summary-ui",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForStatusContext(t, service, ctx, created.Run.ID, RunCompleted)
+	events, err := service.ListEvents(ctx, created.Run.ID, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasEventType(events, "note.draft.candidate") || events[len(events)-1].Type != "run.completed" {
+		t.Fatalf("events = %#v", events)
+	}
+	var routeEvent Event
+	for _, event := range events {
+		if event.Type == "route.decided" {
+			routeEvent = event
+			break
+		}
+	}
+	if routeEvent.Data["intent"] != routing.IntentNoteCreate || routeEvent.Data["reason"] != "history_summary_write" || routeEvent.Data["needs_rag"] != false {
+		t.Fatalf("route event = %#v", routeEvent)
+	}
 }
 
 func TestServiceRoutesOnceAndPersistsSafeExecutorLifecycle(t *testing.T) {

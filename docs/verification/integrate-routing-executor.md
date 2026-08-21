@@ -40,6 +40,7 @@ openspec validate integrate-routing-executor --strict
 | 低置信度写入 | `intent.unclear` / `clarification` | 不调用模型或写工具，输出澄清后正常完成 |
 | 明确新增笔记 | `note.create` / `note_create` | 写入 MySQL 和 Outbox，RAG job 最终为 `completed` |
 | 历史总结候选 | `note.create` / `note_create` | 输出 `note.draft.candidate`，确认前正式笔记数不变 |
+| 历史总结组合表达 | `从历史记录总结一条笔记并记录` → `note.create` / `history_summary_write` | 不走 RAG 问答，输出待确认候选笔记 |
 | 同会话确认 | `note.create` / `note_create`，原因 `draft_confirm` | 写入正式笔记并完成 RAG 索引 |
 | 聊天删除 | `note.delete` / `note_delete_rejected` | 输出页面/API 引导，笔记仍存在且未产生删除投影 |
 

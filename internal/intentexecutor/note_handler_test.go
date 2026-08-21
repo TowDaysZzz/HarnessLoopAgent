@@ -83,6 +83,28 @@ func TestHistorySummaryCreatesDraftWithoutFormalNote(t *testing.T) {
 	}
 }
 
+func TestHistorySummaryUIPhraseCreatesDraftWithoutRAGOrFormalNote(t *testing.T) {
+	notes := &noteCreatorFake{}
+	drafts, _ := notedraft.NewService(notedraft.NewMemoryRepository(), 24*time.Hour)
+	summarizer := &summarizerFake{}
+	handler := NoteCreateHandler{Notes: notes, Drafts: drafts, Summarizer: summarizer}
+	result, err := handler.Execute(context.Background(), routing.Input{
+		Run: routing.RunContext{
+			RunID: "run-ui", SessionID: "session-ui", UserID: 1, TenantID: 2,
+			Decision: routing.RouteDecision{Intent: routing.IntentNoteCreate, Reason: "history_summary_write", NeedsModel: true},
+		},
+		Content: "从历史记录总结一条笔记并记录",
+		Messages: []agent.Message{
+			{Role: "user", Content: "Go GC 的标记阶段是什么？"},
+			{Role: "assistant", Content: "主要包括标记准备、并发标记和标记终止。"},
+			{Role: "user", Content: "从历史记录总结一条笔记并记录"},
+		},
+	})
+	if err != nil || notes.calls != 0 || summarizer.calls != 1 || !result.NeedConfirm || result.Candidate == nil {
+		t.Fatalf("Execute() = %#v, note calls=%d summary calls=%d err=%v", result, notes.calls, summarizer.calls, err)
+	}
+}
+
 func TestConfirmCancelAndModifyDraft(t *testing.T) {
 	notes := &noteCreatorFake{}
 	drafts, _ := notedraft.NewService(notedraft.NewMemoryRepository(), 24*time.Hour)

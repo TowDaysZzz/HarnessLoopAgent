@@ -49,6 +49,11 @@ func (c Classifier) Classify(input string) RouteDecision {
 	if containsAny(text, "删除笔记", "删除这条笔记", "删掉笔记", "删除记录", "帮我删") {
 		return RouteDecision{Intent: IntentNoteDelete, Complexity: complexity, Deterministic: true, Confidence: .98, Reason: "explicit_delete"}
 	}
+	// A request to turn conversation/history content into a note is a write
+	// intent even when it also contains broad query words such as "历史记录".
+	if isHistorySummaryWrite(text) {
+		return c.enforceWriteConfidence(RouteDecision{Intent: IntentNoteCreate, Complexity: complexity, Deterministic: true, NeedsModel: true, Confidence: .98, Reason: "history_summary_write"})
+	}
 	if containsAny(text, "帮我记住", "记一笔", "保存笔记", "记录一下", "记下来", "总结刚才") {
 		return c.enforceWriteConfidence(RouteDecision{Intent: IntentNoteCreate, Complexity: complexity, Deterministic: true, NeedsModel: containsAny(text, "总结刚才", "总结以上", "从聊天历史"), Confidence: .98, Reason: "explicit_note_write"})
 	}
@@ -59,6 +64,17 @@ func (c Classifier) Classify(input string) RouteDecision {
 		return RouteDecision{Intent: IntentNoteQuery, Complexity: complexity, NeedsRAG: true, NeedsModel: true, Confidence: .95, Reason: "historical_note_query"}
 	}
 	return RouteDecision{Intent: IntentChat, Complexity: complexity, NeedsModel: true, Confidence: .8, Reason: "default_chat"}
+}
+
+func isHistorySummaryWrite(text string) bool {
+	if !containsAny(text, "总结", "整理", "归纳", "提取") || !containsAny(text, "笔记", "记一笔") {
+		return false
+	}
+	return containsAny(text,
+		"总结刚才", "总结以上", "聊天历史", "对话历史", "当前对话", "本次对话",
+		"记成", "整理成", "归纳成", "生成一条笔记", "总结一条笔记", "提取一条笔记",
+		"并记录", "并保存",
+	)
 }
 
 func (c Classifier) enforceWriteConfidence(decision RouteDecision) RouteDecision {

@@ -16,6 +16,7 @@ import (
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/contextmanager"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/ragclient"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/routing"
+	agentruntime "github.com/TowDaysZzz/HarnessLoopAgent/internal/runtime"
 )
 
 type IntentRouter interface {
@@ -181,6 +182,8 @@ func (s *Service) CancelRun(ctx context.Context, runID string) (Run, error) {
 
 func (s *Service) execute(runID string, owner Owner, userAccessToken string, knowledgeBaseIDs []uint64) {
 	ctx, cancel := context.WithCancel(s.root)
+	ctx = agentruntime.WithRunID(ctx, runID)
+	ctx = ragclient.WithTraceHeaders(ctx, ragclient.TraceHeaders{RequestID: runID})
 	if strings.TrimSpace(userAccessToken) != "" {
 		ctx = ragclient.WithUserAccessToken(ctx, userAccessToken)
 	}
@@ -336,6 +339,14 @@ func (s *Service) execute(runID string, owner Owner, userAccessToken string, kno
 			s.notifier.Notify(runID)
 			return
 		}
+	}
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		_, _ = s.append(runID, "executor.failed", executorEventMap(decision, handlerName, "failed", "run_timeout", time.Since(executorStartedAt)))
+		s.fail(runID, RunTimedOut, "run_timeout", ctx.Err())
+		return
 	}
 	_, _ = s.append(runID, "executor.failed", executorEventMap(decision, handlerName, "failed", "stream_closed", time.Since(executorStartedAt)))
 	s.fail(runID, RunFailed, "stream_closed", errors.New("agent stream closed without terminal event"))
