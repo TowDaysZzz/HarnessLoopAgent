@@ -52,14 +52,19 @@ type RAGConfig struct {
 }
 
 type AgentConfig struct {
-	EnableMultiAgent  bool
-	RunTimeout        time.Duration
-	ToolTimeout       time.Duration
-	MaxIterations     int
-	MaxModelCalls     int
-	MaxToolCalls      int
-	MaxRepairAttempts int
-	MaxOutputTokens   int
+	EnableMultiAgent            bool
+	EnableIntentRouting         bool
+	EnableLegacyRoutingFallback bool
+	IntentComplexThreshold      int
+	IntentMinWriteConfidence    float64
+	NoteDraftTTL                time.Duration
+	RunTimeout                  time.Duration
+	ToolTimeout                 time.Duration
+	MaxIterations               int
+	MaxModelCalls               int
+	MaxToolCalls                int
+	MaxRepairAttempts           int
+	MaxOutputTokens             int
 }
 
 type ResilienceConfig struct {
@@ -141,14 +146,19 @@ type fileConfig struct {
 }
 
 type fileAgentConfig struct {
-	EnableMultiAgent  bool   `yaml:"ENABLE_MULTI_AGENT"`
-	RunTimeout        string `yaml:"RUN_TIMEOUT"`
-	ToolTimeout       string `yaml:"TOOL_TIMEOUT"`
-	MaxIterations     int    `yaml:"MAX_ITERATIONS"`
-	MaxModelCalls     int    `yaml:"MAX_MODEL_CALLS"`
-	MaxToolCalls      int    `yaml:"MAX_TOOL_CALLS"`
-	MaxRepairAttempts int    `yaml:"MAX_REPAIR_ATTEMPTS"`
-	MaxOutputTokens   int    `yaml:"MAX_OUTPUT_TOKENS"`
+	EnableMultiAgent            bool    `yaml:"ENABLE_MULTI_AGENT"`
+	EnableIntentRouting         bool    `yaml:"ENABLE_INTENT_ROUTING"`
+	EnableLegacyRoutingFallback bool    `yaml:"ENABLE_LEGACY_ROUTING_FALLBACK"`
+	IntentComplexThreshold      int     `yaml:"INTENT_COMPLEX_THRESHOLD"`
+	IntentMinWriteConfidence    float64 `yaml:"INTENT_MIN_WRITE_CONFIDENCE"`
+	NoteDraftTTL                string  `yaml:"NOTE_DRAFT_TTL"`
+	RunTimeout                  string  `yaml:"RUN_TIMEOUT"`
+	ToolTimeout                 string  `yaml:"TOOL_TIMEOUT"`
+	MaxIterations               int     `yaml:"MAX_ITERATIONS"`
+	MaxModelCalls               int     `yaml:"MAX_MODEL_CALLS"`
+	MaxToolCalls                int     `yaml:"MAX_TOOL_CALLS"`
+	MaxRepairAttempts           int     `yaml:"MAX_REPAIR_ATTEMPTS"`
+	MaxOutputTokens             int     `yaml:"MAX_OUTPUT_TOKENS"`
 }
 
 type fileResilienceConfig struct {
@@ -287,6 +297,10 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	noteDraftTTL, err := parseDuration("NOTE_DRAFT_TTL", raw.Agent.NoteDraftTTL)
+	if err != nil {
+		return Config{}, err
+	}
 
 	cfg := Config{
 		HTTPAddr:        strings.TrimSpace(raw.HTTPAddr),
@@ -309,8 +323,13 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 			StrategyProfile: strings.TrimSpace(raw.RAG.StrategyProfile),
 		},
 		Agent: AgentConfig{
-			EnableMultiAgent: raw.Agent.EnableMultiAgent,
-			RunTimeout:       runTimeout, ToolTimeout: toolTimeout,
+			EnableMultiAgent:            raw.Agent.EnableMultiAgent,
+			EnableIntentRouting:         raw.Agent.EnableIntentRouting,
+			EnableLegacyRoutingFallback: raw.Agent.EnableLegacyRoutingFallback,
+			IntentComplexThreshold:      raw.Agent.IntentComplexThreshold,
+			IntentMinWriteConfidence:    raw.Agent.IntentMinWriteConfidence,
+			NoteDraftTTL:                noteDraftTTL,
+			RunTimeout:                  runTimeout, ToolTimeout: toolTimeout,
 			MaxIterations: raw.Agent.MaxIterations, MaxModelCalls: raw.Agent.MaxModelCalls,
 			MaxToolCalls: raw.Agent.MaxToolCalls, MaxRepairAttempts: raw.Agent.MaxRepairAttempts,
 			MaxOutputTokens: raw.Agent.MaxOutputTokens,
@@ -445,6 +464,15 @@ func (c AgentConfig) Validate() error {
 	if c.MaxIterations < 1 || c.MaxModelCalls < 1 || c.MaxToolCalls < 1 || c.MaxOutputTokens < 1 || c.MaxRepairAttempts < 0 {
 		return errors.New("AGENT limits must be positive and MAX_REPAIR_ATTEMPTS must not be negative")
 	}
+	if c.IntentComplexThreshold < 1 {
+		return errors.New("INTENT_COMPLEX_THRESHOLD must be positive")
+	}
+	if c.IntentMinWriteConfidence < 0 || c.IntentMinWriteConfidence > 1 {
+		return errors.New("INTENT_MIN_WRITE_CONFIDENCE must be within [0,1]")
+	}
+	if c.NoteDraftTTL <= 0 {
+		return errors.New("NOTE_DRAFT_TTL must be greater than zero")
+	}
 	return nil
 }
 
@@ -516,8 +544,9 @@ func defaultFileConfig() fileConfig {
 			StrategyProfile: "default",
 		},
 		Agent: fileAgentConfig{
-			EnableMultiAgent: false,
-			RunTimeout:       "90s", ToolTimeout: "15s", MaxIterations: 6,
+			EnableMultiAgent: false, EnableIntentRouting: true, EnableLegacyRoutingFallback: true,
+			IntentComplexThreshold: 120, IntentMinWriteConfidence: 0.95, NoteDraftTTL: "24h",
+			RunTimeout: "90s", ToolTimeout: "15s", MaxIterations: 6,
 			MaxModelCalls: 3, MaxToolCalls: 3, MaxRepairAttempts: 1, MaxOutputTokens: 2000,
 		},
 		Resilience: fileResilienceConfig{
@@ -611,6 +640,7 @@ func applyServiceEnvironment(raw *fileConfig) error {
 		"RAG_STRATEGY_PROFILE":       &raw.RAG.StrategyProfile,
 		"AGENT_RUN_TIMEOUT":          &raw.Agent.RunTimeout,
 		"AGENT_TOOL_TIMEOUT":         &raw.Agent.ToolTimeout,
+		"NOTE_DRAFT_TTL":             &raw.Agent.NoteDraftTTL,
 		"RETRY_BASE_DELAY":           &raw.Resilience.RetryBaseDelay,
 		"RETRY_MAX_DELAY":            &raw.Resilience.RetryMaxDelay,
 		"CIRCUIT_OPEN_TIMEOUT":       &raw.Resilience.CircuitOpenTimeout,
@@ -621,12 +651,14 @@ func applyServiceEnvironment(raw *fileConfig) error {
 		"AUTH_COOKIE_NAME":           &raw.Auth.CookieName,
 	})
 	for key, target := range map[string]*bool{
-		"DATABASE_ENABLED":      &raw.Database.Enabled,
-		"DATABASE_AUTO_MIGRATE": &raw.Database.AutoMigrate,
-		"AUTH_ENABLED":          &raw.Auth.Enabled,
-		"AUTH_COOKIE_SECURE":    &raw.Auth.CookieSecure,
-		"NOTE_ENABLED":          &raw.Note.Enabled,
-		"ENABLE_MULTI_AGENT":    &raw.Agent.EnableMultiAgent,
+		"DATABASE_ENABLED":               &raw.Database.Enabled,
+		"DATABASE_AUTO_MIGRATE":          &raw.Database.AutoMigrate,
+		"AUTH_ENABLED":                   &raw.Auth.Enabled,
+		"AUTH_COOKIE_SECURE":             &raw.Auth.CookieSecure,
+		"NOTE_ENABLED":                   &raw.Note.Enabled,
+		"ENABLE_MULTI_AGENT":             &raw.Agent.EnableMultiAgent,
+		"ENABLE_INTENT_ROUTING":          &raw.Agent.EnableIntentRouting,
+		"ENABLE_LEGACY_ROUTING_FALLBACK": &raw.Agent.EnableLegacyRoutingFallback,
 	} {
 		if err := applyBoolEnvironment(key, target); err != nil {
 			return err
@@ -666,6 +698,7 @@ func applyServiceEnvironment(raw *fileConfig) error {
 		"AGENT_MAX_TOOL_CALLS":          &raw.Agent.MaxToolCalls,
 		"AGENT_MAX_REPAIR_ATTEMPTS":     &raw.Agent.MaxRepairAttempts,
 		"AGENT_MAX_OUTPUT_TOKENS":       &raw.Agent.MaxOutputTokens,
+		"INTENT_COMPLEX_THRESHOLD":      &raw.Agent.IntentComplexThreshold,
 		"MODEL_MAX_ATTEMPTS":            &raw.Resilience.ModelMaxAttempts,
 		"RAG_MAX_ATTEMPTS":              &raw.Resilience.RAGMaxAttempts,
 		"MODEL_MAX_CONCURRENCY":         &raw.Resilience.ModelMaxConcurrency,
@@ -684,8 +717,9 @@ func applyServiceEnvironment(raw *fileConfig) error {
 		}
 	}
 	for key, target := range map[string]*float64{
-		"GROUNDING_MIN_TOP_SCORE":  &raw.Grounding.MinTopScore,
-		"GROUNDING_MIN_ITEM_SCORE": &raw.Grounding.MinItemScore,
+		"GROUNDING_MIN_TOP_SCORE":     &raw.Grounding.MinTopScore,
+		"GROUNDING_MIN_ITEM_SCORE":    &raw.Grounding.MinItemScore,
+		"INTENT_MIN_WRITE_CONFIDENCE": &raw.Agent.IntentMinWriteConfidence,
 	} {
 		if err := applyFloatEnvironment(key, target); err != nil {
 			return err

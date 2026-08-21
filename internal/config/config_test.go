@@ -252,6 +252,61 @@ GROUNDING:
 	}
 }
 
+func TestLoadIntentRoutingConfigFromYAMLAndEnvironment(t *testing.T) {
+	clearOverrides(t)
+	path := writeConfig(t, `
+MODEL_NAME: test
+MODEL_API_KEY: key
+AGENT:
+  ENABLE_INTENT_ROUTING: false
+  ENABLE_LEGACY_ROUTING_FALLBACK: false
+  INTENT_COMPLEX_THRESHOLD: 180
+  INTENT_MIN_WRITE_CONFIDENCE: 0.8
+  NOTE_DRAFT_TTL: 12h
+`)
+	t.Setenv("ENABLE_INTENT_ROUTING", "true")
+	t.Setenv("INTENT_COMPLEX_THRESHOLD", "150")
+	t.Setenv("NOTE_DRAFT_TTL", "36h")
+
+	cfg, err := LoadWithOptions(LoadOptions{Path: path})
+	if err != nil {
+		t.Fatalf("LoadWithOptions() error = %v", err)
+	}
+	if !cfg.Agent.EnableIntentRouting || cfg.Agent.EnableLegacyRoutingFallback {
+		t.Fatalf("routing switches = %#v", cfg.Agent)
+	}
+	if cfg.Agent.IntentComplexThreshold != 150 || cfg.Agent.IntentMinWriteConfidence != 0.8 || cfg.Agent.NoteDraftTTL != 36*time.Hour {
+		t.Fatalf("routing settings = %#v", cfg.Agent)
+	}
+}
+
+func TestIntentRoutingConfigDefaults(t *testing.T) {
+	clearOverrides(t)
+	cfg, err := LoadWithOptions(LoadOptions{Path: writeConfig(t, "MODEL_NAME: test\nMODEL_API_KEY: key\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Agent.EnableIntentRouting || !cfg.Agent.EnableLegacyRoutingFallback || cfg.Agent.IntentComplexThreshold != 120 || cfg.Agent.IntentMinWriteConfidence != 0.95 || cfg.Agent.NoteDraftTTL != 24*time.Hour {
+		t.Fatalf("routing defaults = %#v", cfg.Agent)
+	}
+}
+
+func TestLoadRejectsInvalidIntentRoutingConfig(t *testing.T) {
+	for name, yaml := range map[string]string{
+		"threshold":  "INTENT_COMPLEX_THRESHOLD: 0",
+		"confidence": "INTENT_MIN_WRITE_CONFIDENCE: 1.1",
+		"ttl":        "NOTE_DRAFT_TTL: 0s",
+	} {
+		t.Run(name, func(t *testing.T) {
+			clearOverrides(t)
+			path := writeConfig(t, "MODEL_NAME: test\nMODEL_API_KEY: key\nAGENT:\n  "+yaml+"\n")
+			if _, err := LoadWithOptions(LoadOptions{Path: path}); err == nil {
+				t.Fatal("expected invalid routing configuration error")
+			}
+		})
+	}
+}
+
 func TestLoadDatabaseAndContextConfig(t *testing.T) {
 	clearOverrides(t)
 	path := writeConfig(t, `
@@ -297,6 +352,7 @@ func clearOverrides(t *testing.T) {
 		"MODEL_PROVIDER", "MODEL_BASE_URL", "MODEL_NAME", "MODEL_API_KEY", "MODEL_TIMEOUT",
 		"RAG_ENABLED", "RAG_BASE_URL", "RAG_API_KEY", "RAG_KB_IDS", "RAG_TIMEOUT", "RAG_TOP_K", "RAG_STRATEGY_PROFILE",
 		"AGENT_RUN_TIMEOUT", "AGENT_TOOL_TIMEOUT", "AGENT_MAX_ITERATIONS", "AGENT_MAX_MODEL_CALLS", "AGENT_MAX_TOOL_CALLS", "AGENT_MAX_REPAIR_ATTEMPTS", "AGENT_MAX_OUTPUT_TOKENS",
+		"ENABLE_MULTI_AGENT", "ENABLE_INTENT_ROUTING", "ENABLE_LEGACY_ROUTING_FALLBACK", "INTENT_COMPLEX_THRESHOLD", "INTENT_MIN_WRITE_CONFIDENCE", "NOTE_DRAFT_TTL",
 		"MODEL_MAX_ATTEMPTS", "RAG_MAX_ATTEMPTS", "RETRY_BASE_DELAY", "RETRY_MAX_DELAY", "MODEL_MAX_CONCURRENCY", "RAG_MAX_CONCURRENCY", "CIRCUIT_FAILURE_THRESHOLD", "CIRCUIT_OPEN_TIMEOUT",
 		"GROUNDING_REQUIRE_RAG_FOR_NOTE_QUERY", "GROUNDING_REQUIRE_EVIDENCE_GATE", "GROUNDING_REQUIRE_CITATION_CHECK", "GROUNDING_MIN_RESULTS", "GROUNDING_MIN_TOP_SCORE", "GROUNDING_MIN_ITEM_SCORE", "GROUNDING_REQUIRE_COMPLETE_CITATION", "GROUNDING_MAX_CONTEXT_CHARS", "GROUNDING_REJECT_PROMPT_INJECTION",
 		"DATABASE_ENABLED", "DATABASE_DSN", "DATABASE_AUTO_MIGRATE", "DATABASE_MAX_OPEN_CONNS", "DATABASE_MAX_IDLE_CONNS", "DATABASE_CONN_MAX_LIFETIME",

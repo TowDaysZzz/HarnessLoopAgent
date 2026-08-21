@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -14,11 +15,24 @@ import (
 	agentauth "github.com/TowDaysZzz/HarnessLoopAgent/internal/auth"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/contextmanager"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/ragclient"
+	"github.com/TowDaysZzz/HarnessLoopAgent/internal/routing"
 )
 
+type IntentRouter interface {
+	Route(context.Context, routing.RouteInput) routing.RouteDecision
+}
+
+type IntentExecutor interface {
+	Execute(context.Context, routing.Input) (routing.Execution, error)
+}
+
 type ServiceOptions struct {
-	MessageHistoryLimit int
-	DefaultModel        string
+	MessageHistoryLimit         int
+	DefaultModel                string
+	EnableIntentRouting         bool
+	EnableLegacyRoutingFallback bool
+	Router                      IntentRouter
+	Executor                    IntentExecutor
 }
 
 type Service struct {
@@ -26,6 +40,8 @@ type Service struct {
 	repo      Repository
 	runner    agent.ConversationRunner
 	assembler contextmanager.Assembler
+	router    IntentRouter
+	executor  IntentExecutor
 	notifier  *Notifier
 	options   ServiceOptions
 
@@ -42,7 +58,11 @@ func NewService(root context.Context, repo Repository, runner agent.Conversation
 	}
 	service := &Service{
 		root: root, repo: repo, runner: runner, assembler: assembler,
+		router: options.Router, executor: options.Executor,
 		notifier: NewNotifier(), options: options, cancels: make(map[string]context.CancelFunc),
+	}
+	if options.EnableIntentRouting && (service.router == nil || service.executor == nil) {
+		return nil, errors.New("intent routing requires router and executor")
 	}
 	if err := repo.InterruptRunning(root); err != nil {
 		return nil, fmt.Errorf("recover interrupted runs: %w", err)
@@ -213,8 +233,51 @@ func (s *Service) execute(runID string, owner Owner, userAccessToken string, kno
 		}
 	}
 
+	var stream <-chan agent.Event
+	handlerName := "legacy"
+	decision := routing.RouteDecision{Intent: routing.IntentChat, Complexity: routing.ComplexitySimple, NeedsModel: true, Confidence: 1, Reason: "legacy_routing_disabled"}
+	if s.options.EnableIntentRouting {
+		lastUserInput := ""
+		for index := len(contextResult.Messages) - 1; index >= 0; index-- {
+			if contextResult.Messages[index].Role == "user" {
+				lastUserInput = contextResult.Messages[index].Content
+				break
+			}
+		}
+		decision = s.router.Route(ctx, routing.RouteInput{
+			UserID: owner.UserID, TenantID: owner.TenantID, SessionID: run.SessionID, Content: lastUserInput,
+		})
+		if _, err := s.append(runID, "route.decided", routeEventMap(decision)); err != nil {
+			s.fail(runID, RunFailed, "persist_event_failed", err)
+			return
+		}
+		execution, executeErr := s.executor.Execute(ctx, routing.Input{
+			Run: routing.RunContext{
+				RunID: runID, SessionID: run.SessionID, UserID: owner.UserID, TenantID: owner.TenantID,
+				AccessToken: userAccessToken, KnowledgeBaseIDs: append([]uint64(nil), knowledgeBaseIDs...), Decision: decision,
+			},
+			Content: lastUserInput, Messages: contextResult.Messages,
+		})
+		if executeErr != nil {
+			if !s.canLegacyFallback(decision) {
+				s.fail(runID, RunFailed, "executor_unavailable", executeErr)
+				return
+			}
+			stream = s.runner.StreamMessages(ctx, contextResult.Messages)
+		} else {
+			handlerName, stream = execution.Handler, execution.Events
+		}
+	} else {
+		stream = s.runner.StreamMessages(ctx, contextResult.Messages)
+	}
+	executorStartedAt := time.Now()
+	if _, err := s.append(runID, "executor.started", executorEventMap(decision, handlerName, "started", "", 0)); err != nil {
+		s.fail(runID, RunFailed, "persist_event_failed", err)
+		return
+	}
+
 	var answer strings.Builder
-	for event := range s.runner.StreamMessages(ctx, contextResult.Messages) {
+	for event := range stream {
 		switch event.Type {
 		case agent.EventTextDelta:
 			answer.WriteString(event.Delta)
@@ -233,6 +296,16 @@ func (s *Service) execute(runID string, owner Owner, userAccessToken string, kno
 				s.fail(runID, RunFailed, "persist_event_failed", err)
 				return
 			}
+		case agent.EventDraftCandidate:
+			data := map[string]any{}
+			if err := json.Unmarshal([]byte(event.Delta), &data); err != nil {
+				s.fail(runID, RunFailed, "invalid_candidate_event", err)
+				return
+			}
+			if _, err := s.append(runID, string(event.Type), data); err != nil {
+				s.fail(runID, RunFailed, "persist_event_failed", err)
+				return
+			}
 		case agent.EventRunFailed:
 			status := RunFailed
 			code := "agent_failed"
@@ -242,9 +315,14 @@ func (s *Service) execute(runID string, owner Owner, userAccessToken string, kno
 			if errors.Is(event.Err, context.DeadlineExceeded) {
 				status, code = RunTimedOut, "run_timeout"
 			}
+			_, _ = s.append(runID, "executor.failed", executorEventMap(decision, handlerName, "failed", code, time.Since(executorStartedAt)))
 			s.fail(runID, status, code, event.Err)
 			return
 		case agent.EventRunCompleted:
+			if _, err := s.append(runID, "executor.completed", executorEventMap(decision, handlerName, "completed", "", time.Since(executorStartedAt))); err != nil {
+				s.fail(runID, RunFailed, "persist_event_failed", err)
+				return
+			}
 			now := time.Now().UTC()
 			assistant := Message{
 				ID: uuid.NewString(), SessionID: run.SessionID, RunID: runID,
@@ -259,7 +337,31 @@ func (s *Service) execute(runID string, owner Owner, userAccessToken string, kno
 			return
 		}
 	}
+	_, _ = s.append(runID, "executor.failed", executorEventMap(decision, handlerName, "failed", "stream_closed", time.Since(executorStartedAt)))
 	s.fail(runID, RunFailed, "stream_closed", errors.New("agent stream closed without terminal event"))
+}
+
+func (s *Service) canLegacyFallback(decision routing.RouteDecision) bool {
+	if !s.options.EnableLegacyRoutingFallback {
+		return false
+	}
+	return decision.Intent == routing.IntentChat || decision.Intent == routing.IntentNoteQuery
+}
+
+func routeEventMap(decision routing.RouteDecision) map[string]any {
+	value := routing.NewRouteEventData(decision)
+	return map[string]any{
+		"intent": value.Intent, "complexity": value.Complexity, "confidence": value.Confidence,
+		"reason": value.Reason, "deterministic": value.Deterministic, "needs_rag": value.NeedsRAG, "needs_model": value.NeedsModel,
+	}
+}
+
+func executorEventMap(decision routing.RouteDecision, handler, status, errorCode string, duration time.Duration) map[string]any {
+	value := routing.NewExecutorEventData(decision, handler, status, errorCode, duration)
+	return map[string]any{
+		"intent": value.Intent, "complexity": value.Complexity, "handler": value.Handler,
+		"status": value.Status, "error_code": value.ErrorCode, "duration_ms": value.DurationMS,
+	}
 }
 
 func ownerFromContext(ctx context.Context) Owner {

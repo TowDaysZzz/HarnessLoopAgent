@@ -13,12 +13,15 @@ import (
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/chat"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/config"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/contextmanager"
+	"github.com/TowDaysZzz/HarnessLoopAgent/internal/intentexecutor"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/knowledgebase"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/mcpfacade"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/note"
+	"github.com/TowDaysZzz/HarnessLoopAgent/internal/notedraft"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/platform/httpserver"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/platform/mysqlstore"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/ragclient"
+	"github.com/TowDaysZzz/HarnessLoopAgent/internal/routing"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/tools"
 )
 
@@ -59,18 +62,7 @@ func run() error {
 				return err
 			}
 		}
-		assembler := contextmanager.NewBoundedAssembler(
-			cfg.Context.MaxInputTokens, cfg.Context.MinRecentMessages, contextmanager.ApproxTokenCounter{},
-		)
-		chatService, err := chat.NewService(ctx, store, agentRunner, assembler, chat.ServiceOptions{
-			MessageHistoryLimit: cfg.Context.MessageHistoryLimit,
-			DefaultModel:        cfg.ActiveModel,
-		})
-		if err != nil {
-			return err
-		}
-		serverOptions = append(serverOptions, httpserver.WithChatService(chatService))
-
+		var noteService *note.Service
 		if cfg.Auth.Enabled {
 			rag, err := ragclient.NewClient(ragclient.ClientConfig{BaseURL: cfg.RAG.BaseURL, APIKey: cfg.RAG.APIKey, Timeout: cfg.RAG.Timeout})
 			if err != nil {
@@ -89,7 +81,7 @@ func run() error {
 			}
 			serverOptions = append(serverOptions, httpserver.WithKnowledgeBaseService(knowledgeBaseService))
 			if cfg.Note.Enabled {
-				noteService, err := note.NewServiceWithResolver(store, rag, knowledgeBaseService)
+				noteService, err = note.NewServiceWithResolver(store, rag, knowledgeBaseService)
 				if err != nil {
 					return err
 				}
@@ -113,6 +105,44 @@ func run() error {
 				serverOptions = append(serverOptions, httpserver.WithMCPFacade(facade))
 			}
 		}
+
+		assembler := contextmanager.NewBoundedAssembler(
+			cfg.Context.MaxInputTokens, cfg.Context.MinRecentMessages, contextmanager.ApproxTokenCounter{},
+		)
+		draftService, err := notedraft.NewService(store, cfg.Agent.NoteDraftTTL)
+		if err != nil {
+			return err
+		}
+		complexHandler, err := routing.NewComplexHandler(agentRunner, cfg.Agent.RunTimeout, cfg.Agent.MaxIterations)
+		if err != nil {
+			return err
+		}
+		var noteCreateHandler routing.DeterministicHandler = routing.StaticTextHandler{Text: "当前服务未启用笔记写入，请联系管理员检查 NOTE 配置。"}
+		if noteService != nil {
+			noteCreateHandler = intentexecutor.NoteCreateHandler{
+				Notes: noteService, Projector: noteService, Drafts: draftService, Summarizer: intentexecutor.RunnerSummarizer{Runner: agentRunner},
+			}
+		}
+		executor, err := routing.NewFacade(routing.HandlerSet{
+			NoteCreate: noteCreateHandler, Clarification: routing.ClarificationHandler{}, DeleteRejected: routing.DeleteRejectedHandler{},
+			SimpleChat: routing.ConversationHandler{Runner: agentRunner}, SimpleNoteQuery: routing.ConversationHandler{Runner: agentRunner},
+			ComplexChat: complexHandler, ComplexNoteQuery: complexHandler,
+		})
+		if err != nil {
+			return err
+		}
+		intentRouter := routing.Router{Classifier: routing.Classifier{
+			ComplexThreshold: cfg.Agent.IntentComplexThreshold, MinWriteConfidence: cfg.Agent.IntentMinWriteConfidence,
+		}, Drafts: draftService}
+		chatService, err := chat.NewService(ctx, store, agentRunner, assembler, chat.ServiceOptions{
+			MessageHistoryLimit: cfg.Context.MessageHistoryLimit, DefaultModel: cfg.ActiveModel,
+			EnableIntentRouting: cfg.Agent.EnableIntentRouting, EnableLegacyRoutingFallback: cfg.Agent.EnableLegacyRoutingFallback,
+			Router: intentRouter, Executor: executor,
+		})
+		if err != nil {
+			return err
+		}
+		serverOptions = append(serverOptions, httpserver.WithChatService(chatService))
 	}
 
 	httpServer := httpserver.New(cfg.HTTPAddr, func() bool { return agentRunner != nil && (!cfg.Database.Enabled || store != nil) }, serverOptions...)
