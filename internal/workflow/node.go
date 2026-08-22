@@ -12,8 +12,9 @@ const (
 func (d Directive) Valid() bool { return d == DirectiveContinue || d == DirectiveSuspend }
 
 type NodeInput[T any] struct {
-	State  WorkflowState[T]
-	Resume *ResumeCommand
+	State       WorkflowState[T]
+	Resume      *ResumeCommand
+	ExecutionID string
 }
 
 type NodeResult[T any] struct {

@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"time"
 )
@@ -128,7 +129,8 @@ func (r *Runner[T]) executeFrom(ctx context.Context, state WorkflowState[T], sta
 			return r.observerFailure(state, node.ID(), err)
 		}
 
-		output, err := node.Execute(ctx, NodeInput[T]{State: state, Resume: resume})
+		executionID := fmt.Sprintf("%s:%s:%d", state.Meta.RunID, node.ID(), state.Control.CurrentAttempt)
+		output, err := node.Execute(ctx, NodeInput[T]{State: state, Resume: resume, ExecutionID: executionID})
 		resume = nil
 		duration := r.now().UTC().Sub(startedAt)
 		if duration < 0 {
