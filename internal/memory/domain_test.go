@@ -114,6 +114,12 @@ func TestRelationProposalCodec(t *testing.T) {
 	if _, err := DecodeRelationProposals(raw, allowed, 2); err != nil {
 		t.Fatal(err)
 	}
+	for _, relation := range []ProposedRelation{ProposalDuplicate, ProposalRefinement, ProposalCorrection, ProposalContradiction, ProposalTemporalChange, ProposalIndependent} {
+		raw, _ := json.Marshal([]RelationProposal{{MemoryID: "mem-1", Relation: relation, Confidence: 1, ReasonCode: "bounded"}})
+		if _, err := DecodeRelationProposals(raw, allowed, 1); err != nil {
+			t.Fatalf("relation %s: %v", relation, err)
+		}
+	}
 	for _, bad := range [][]byte{[]byte(`[{"memory_id":"unknown","relation":"duplicate","confidence":1,"reason_code":"x"}]`), []byte(`[{"memory_id":"mem-1","relation":"delete","confidence":1,"reason_code":"x"}]`), []byte(`[{"memory_id":"mem-1","relation":"duplicate","confidence":2,"reason_code":"x"}]`), []byte(`[{"memory_id":"mem-1","relation":"duplicate","confidence":1,"reason_code":"x","store_command":"delete"}]`)} {
 		if _, err := DecodeRelationProposals(bad, allowed, 2); !errors.Is(err, ErrInvalidInput) {
 			t.Fatalf("bad codec error=%v", err)

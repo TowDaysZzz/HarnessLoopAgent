@@ -2,7 +2,9 @@ package mysqlstore
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -84,12 +86,36 @@ func (s *Store) BatchGet(ctx context.Context, owner memory.Owner, ids []string) 
 }
 
 func (s *Store) FindExact(ctx context.Context, q memory.ExactQuery) ([]memory.Record, error) {
-	if !q.Owner.Valid() || q.Limit <= 0 || q.Limit > 200 {
-		return nil, memory.ErrInvalidInput
+	if err := q.Validate(); err != nil {
+		return nil, err
+	}
+	if !q.HasSelector() {
+		return []memory.Record{}, nil
 	}
 	where := []string{"tenant_id=?", "user_id=?", "scope_type=?", "scope_id=?"}
 	args := []any{q.Owner.TenantID, q.Owner.UserID, q.Scope.Type, q.Scope.ID}
+	if q.ActiveAt != nil {
+		where = append(where, "status='active'", "(expires_at IS NULL OR expires_at>?)")
+		args = append(args, q.ActiveAt.UTC())
+	}
+	if len(q.Layers) > 0 {
+		marks := strings.TrimSuffix(strings.Repeat("?,", len(q.Layers)), ",")
+		where = append(where, "layer IN ("+marks+")")
+		for _, value := range q.Layers {
+			args = append(args, value)
+		}
+	}
+	if len(q.Kinds) > 0 {
+		marks := strings.TrimSuffix(strings.Repeat("?,", len(q.Kinds)), ",")
+		where = append(where, "kind IN ("+marks+")")
+		for _, value := range q.Kinds {
+			args = append(args, value)
+		}
+	}
 	var matches []string
+	if q.ScopeOnly {
+		matches = append(matches, "1=1")
+	}
 	if q.ContentHash != "" {
 		matches = append(matches, "content_hash=?")
 		args = append(args, q.ContentHash)
@@ -102,11 +128,22 @@ func (s *Store) FindExact(ctx context.Context, q memory.ExactQuery) ([]memory.Re
 		matches = append(matches, "(entity_type=? AND entity_id=?)")
 		args = append(args, q.Entity.Type, q.Entity.ID)
 	}
+	for _, hash := range q.ContentHashes {
+		matches = append(matches, "content_hash=?")
+		args = append(args, hash)
+	}
+	for _, slot := range q.Slots {
+		matches = append(matches, "(namespace=? AND slot_key=?)")
+		args = append(args, slot.Namespace, slot.SlotKey)
+	}
+	for _, entity := range q.Entities {
+		matches = append(matches, "(entity_type=? AND entity_id=?)")
+		args = append(args, entity.Type, entity.ID)
+	}
 	if len(q.Refs) > 0 {
-		marks := strings.TrimSuffix(strings.Repeat("?,", len(q.Refs)), ",")
-		matches = append(matches, "id IN ("+marks+")")
 		for _, ref := range q.Refs {
-			args = append(args, ref.ID)
+			matches = append(matches, "(id=? AND lineage_version=? AND content_hash=?)")
+			args = append(args, ref.ID, ref.LineageVersion, ref.ContentHash)
 		}
 	}
 	if len(matches) == 0 {
@@ -114,7 +151,7 @@ func (s *Store) FindExact(ctx context.Context, q memory.ExactQuery) ([]memory.Re
 	}
 	where = append(where, "("+strings.Join(matches, " OR ")+")")
 	args = append(args, q.Limit)
-	rows, err := s.db.QueryContext(ctx, `SELECT `+memoryColumns+` FROM memory_records WHERE `+strings.Join(where, " AND ")+` ORDER BY created_at DESC,id DESC LIMIT ?`, args...)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+memoryColumns+` FROM memory_records WHERE `+strings.Join(where, " AND ")+` ORDER BY created_at DESC,id ASC LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -192,7 +229,7 @@ func (s *Store) CommitMutation(ctx context.Context, m memory.Mutation) (memory.M
 		}
 	}
 	if value.Status == memory.StatusActive {
-		if err := insertProjection(ctx, tx, value, now); err != nil {
+		if err := s.insertProjection(ctx, tx, value, now); err != nil {
 			return memory.MutationResult{}, err
 		}
 	}
@@ -223,10 +260,18 @@ func insertMemory(ctx context.Context, tx *sql.Tx, v memory.Record, now time.Tim
 	return err
 }
 
-func insertProjection(ctx context.Context, tx *sql.Tx, v memory.Record, now time.Time) error {
-	id := v.ID + ":" + v.ContentHash + ":default"
-	_, err := tx.ExecContext(ctx, `INSERT INTO memory_projection_outbox (id,tenant_id,user_id,memory_id,content_hash,model_version,status,available_at,created_at) VALUES (?,?,?,?,?,?,'pending',?,?)`, id, v.Owner.TenantID, v.Owner.UserID, v.ID, v.ContentHash, "default", now, now)
+func (s *Store) insertProjection(ctx context.Context, tx *sql.Tx, v memory.Record, now time.Time) error {
+	if s.projectionVersion == "" {
+		return fmt.Errorf("%w: projection version is not configured", memory.ErrInvalidInput)
+	}
+	id := projectionOutboxID(v.ID, v.ContentHash, s.projectionVersion)
+	_, err := tx.ExecContext(ctx, `INSERT INTO memory_projection_outbox (id,tenant_id,user_id,memory_id,content_hash,model_version,status,available_at,created_at) VALUES (?,?,?,?,?,?,'pending',?,?)`, id, v.Owner.TenantID, v.Owner.UserID, v.ID, v.ContentHash, s.projectionVersion, now, now)
 	return err
+}
+
+func projectionOutboxID(memoryID, contentHash, version string) string {
+	sum := sha256.Sum256([]byte(memoryID + "\x00" + contentHash + "\x00" + version))
+	return hex.EncodeToString(sum[:])
 }
 
 func loadMemoryIdempotency(ctx context.Context, tx *sql.Tx, owner memory.Owner, key, inputHash string) (memory.MutationResult, bool, error) {
@@ -285,7 +330,7 @@ func (s *Store) TransitionMemory(ctx context.Context, owner memory.Owner, id str
 	}
 	value.Status, value.RowVersion, value.UpdatedAt = to, value.RowVersion+1, now
 	if to == memory.StatusActive {
-		if err := insertProjection(ctx, tx, value, now); err != nil {
+		if err := s.insertProjection(ctx, tx, value, now); err != nil {
 			return memory.MutationResult{}, err
 		}
 	}
@@ -296,6 +341,89 @@ func (s *Store) TransitionMemory(ctx context.Context, owner memory.Owner, id str
 		return memory.MutationResult{}, err
 	}
 	return memory.MutationResult{Memory: value}, nil
+}
+
+func (s *Store) ActivateCandidateSuperseding(ctx context.Context, activation memory.CandidateActivation) (memory.MutationResult, error) {
+	if !activation.Owner.Valid() || activation.CandidateID == "" || activation.SupersededID == "" || activation.CandidateID == activation.SupersededID || activation.CandidateVersion == 0 || activation.TargetVersion == 0 || activation.IdempotencyKey == "" || activation.InputHash == "" {
+		return memory.MutationResult{}, memory.ErrInvalidInput
+	}
+	actor, reason, err := memory.NormalizeAuditFields(activation.Actor, activation.ReasonCode)
+	if err != nil {
+		return memory.MutationResult{}, err
+	}
+	now := activation.OccurredAt.UTC()
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return memory.MutationResult{}, err
+	}
+	defer tx.Rollback()
+	if result, found, loadErr := loadMemoryIdempotency(ctx, tx, activation.Owner, activation.IdempotencyKey, activation.InputHash); loadErr != nil {
+		return memory.MutationResult{}, loadErr
+	} else if found {
+		result.Replayed = true
+		if err := tx.Commit(); err != nil {
+			return memory.MutationResult{}, err
+		}
+		return result, nil
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT `+memoryColumns+` FROM memory_records WHERE tenant_id=? AND user_id=? AND id IN (?,?) ORDER BY id FOR UPDATE`, activation.Owner.TenantID, activation.Owner.UserID, activation.CandidateID, activation.SupersededID)
+	if err != nil {
+		return memory.MutationResult{}, err
+	}
+	locked := map[string]memory.Record{}
+	for rows.Next() {
+		value, scanErr := scanMemory(rows)
+		if scanErr != nil {
+			rows.Close()
+			return memory.MutationResult{}, scanErr
+		}
+		locked[value.ID] = value
+	}
+	if err := rows.Close(); err != nil {
+		return memory.MutationResult{}, err
+	}
+	candidate, candidateOK := locked[activation.CandidateID]
+	target, targetOK := locked[activation.SupersededID]
+	if !candidateOK || !targetOK {
+		return memory.MutationResult{}, memory.ErrNotFound
+	}
+	if candidate.RowVersion != activation.CandidateVersion || target.RowVersion != activation.TargetVersion || candidate.Status != memory.StatusCandidate || target.Status != memory.StatusActive || !candidate.Status.CanTransition(memory.StatusActive) || !target.Status.CanTransition(memory.StatusSuperseded) || candidate.SupersedesID != target.ID || candidate.LineageID != target.LineageID || candidate.LineageVersion <= target.LineageVersion {
+		return memory.MutationResult{}, memory.ErrStateConflict
+	}
+	updated, err := tx.ExecContext(ctx, `UPDATE memory_records SET status='superseded',superseded_by=?,row_version=row_version+1,updated_at=? WHERE tenant_id=? AND user_id=? AND id=? AND status='active' AND row_version=?`, candidate.ID, now, activation.Owner.TenantID, activation.Owner.UserID, target.ID, activation.TargetVersion)
+	if err != nil {
+		return memory.MutationResult{}, mapMemoryWriteError(err)
+	}
+	if count, _ := updated.RowsAffected(); count != 1 {
+		return memory.MutationResult{}, memory.ErrStateConflict
+	}
+	updated, err = tx.ExecContext(ctx, `UPDATE memory_records SET status='active',row_version=row_version+1,updated_at=? WHERE tenant_id=? AND user_id=? AND id=? AND status='candidate' AND row_version=?`, now, activation.Owner.TenantID, activation.Owner.UserID, candidate.ID, activation.CandidateVersion)
+	if err != nil {
+		return memory.MutationResult{}, mapMemoryWriteError(err)
+	}
+	if count, _ := updated.RowsAffected(); count != 1 {
+		return memory.MutationResult{}, memory.ErrStateConflict
+	}
+	candidate.Status, candidate.RowVersion, candidate.UpdatedAt = memory.StatusActive, candidate.RowVersion+1, now
+	if _, err := tx.ExecContext(ctx, `INSERT INTO memory_relations (id,tenant_id,user_id,from_memory_id,to_memory_id,relation_type,reason_code,created_at) VALUES (?,?,?,?,?,?,?,?)`, uuid.NewString(), activation.Owner.TenantID, activation.Owner.UserID, candidate.ID, target.ID, memory.RelationSupersedes, reason, now); err != nil {
+		return memory.MutationResult{}, mapMemoryWriteError(err)
+	}
+	if err := s.insertProjection(ctx, tx, candidate, now); err != nil {
+		return memory.MutationResult{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO memory_events (id,tenant_id,user_id,memory_id,event_type,old_status,new_status,actor,reason_code,execution_id,input_hash,result_memory_id,occurred_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, uuid.NewString(), activation.Owner.TenantID, activation.Owner.UserID, candidate.ID, "activated", memory.StatusCandidate, memory.StatusActive, actor, reason, activation.IdempotencyKey, activation.InputHash, candidate.ID, now); err != nil {
+		return memory.MutationResult{}, mapMemoryWriteError(err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO memory_events (id,tenant_id,user_id,memory_id,event_type,old_status,new_status,actor,reason_code,execution_id,input_hash,result_memory_id,occurred_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, uuid.NewString(), activation.Owner.TenantID, activation.Owner.UserID, target.ID, "superseded", memory.StatusActive, memory.StatusSuperseded, actor, reason, activation.IdempotencyKey+":target", activation.InputHash, candidate.ID, now); err != nil {
+		return memory.MutationResult{}, mapMemoryWriteError(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return memory.MutationResult{}, err
+	}
+	return memory.MutationResult{Memory: candidate, Relations: []memory.Relation{{FromID: candidate.ID, ToID: target.ID, Type: memory.RelationSupersedes, ReasonCode: reason}}}, nil
 }
 
 func (s *Store) Expire(ctx context.Context, owner memory.Owner, now time.Time, limit int) (int, error) {
@@ -386,6 +514,12 @@ func (s *Store) ClaimProjections(ctx context.Context, limit int, now time.Time) 
 		return nil, err
 	}
 	return out, nil
+}
+
+func (s *Store) PendingProjectionCount(ctx context.Context) (int64, error) {
+	var count int64
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM memory_projection_outbox WHERE status IN ('pending','failed')`).Scan(&count)
+	return count, err
 }
 
 func (s *Store) CompleteProjection(ctx context.Context, owner memory.Owner, id string, now time.Time) error {

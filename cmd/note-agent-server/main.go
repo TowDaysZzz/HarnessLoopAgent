@@ -43,6 +43,9 @@ func run() error {
 
 	agentRunner, err := einoagent.NewConfiguredRunner(ctx, cfg)
 	if err != nil {
+		if cfg.Memory.Enabled && cfg.Memory.WorkflowPilotEnabled {
+			return memoryStartupError("structured model")
+		}
 		return err
 	}
 
@@ -52,14 +55,46 @@ func run() error {
 		store, err = mysqlstore.Open(ctx, mysqlstore.Options{
 			DSN: cfg.Database.DSN, MaxOpenConns: cfg.Database.MaxOpenConns,
 			MaxIdleConns: cfg.Database.MaxIdleConns, ConnMaxLifetime: cfg.Database.ConnMaxLifetime,
+			ProjectionVersion: cfg.Memory.ProjectionVersion,
 		})
 		if err != nil {
+			if cfg.Memory.Enabled {
+				return memoryStartupError("database")
+			}
 			return err
 		}
 		defer store.Close()
 		if cfg.Database.AutoMigrate {
 			if err := store.Migrate(ctx); err != nil {
+				if cfg.Memory.Enabled {
+					return memoryStartupError("database migration")
+				}
 				return err
+			}
+		}
+		if cfg.Memory.Enabled {
+			var memoryRAG ragclient.MemoryClient
+			if cfg.Memory.RAGEnabled {
+				memoryRAG, err = ragclient.NewClient(ragclient.ClientConfig{
+					BaseURL: cfg.Memory.RAGEndpoint, APIKey: cfg.Memory.RAGServiceToken,
+					OwnerClaimSecret: cfg.Memory.OwnerClaimSecret, Timeout: cfg.Memory.RAGTimeout,
+				})
+				if err != nil {
+					return memoryStartupError("rag")
+				}
+			}
+			memoryRuntime, memoryErr := assembleMemoryRuntime(cfg.Memory, memoryRuntimeDependencies{
+				Repository: store, WorkflowStore: store.WorkflowStore(), EditPayloadStore: store,
+				ProjectionBacklog: store, Runner: agentRunner, RAG: memoryRAG,
+			})
+			if memoryErr != nil {
+				return memoryErr
+			}
+			if memoryRuntime.Capture != nil {
+				serverOptions = append(serverOptions,
+					httpserver.WithMemoryCaptureService(memoryRuntime.Capture),
+					httpserver.WithMemoryChatIntentPilot(cfg.Memory.WorkflowPilotEnabled),
+				)
 			}
 		}
 		var noteService *note.Service

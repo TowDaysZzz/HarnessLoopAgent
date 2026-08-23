@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -14,14 +15,16 @@ import (
 )
 
 type Store struct {
-	db *sql.DB
+	db                *sql.DB
+	projectionVersion string
 }
 
 type Options struct {
-	DSN             string
-	MaxOpenConns    int
-	MaxIdleConns    int
-	ConnMaxLifetime time.Duration
+	DSN               string
+	MaxOpenConns      int
+	MaxIdleConns      int
+	ConnMaxLifetime   time.Duration
+	ProjectionVersion string
 }
 
 func Open(ctx context.Context, options Options) (*Store, error) {
@@ -45,7 +48,12 @@ func Open(ctx context.Context, options Options) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("ping mysql: %w", err)
 	}
-	return &Store{db: db}, nil
+	projectionVersion := strings.TrimSpace(options.ProjectionVersion)
+	if len(projectionVersion) > 128 {
+		db.Close()
+		return nil, errors.New("memory projection version is too large")
+	}
+	return &Store{db: db, projectionVersion: projectionVersion}, nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }

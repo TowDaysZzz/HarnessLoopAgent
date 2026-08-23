@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -20,37 +21,7 @@ var (
 	ErrPinnedMemoryChanged = errors.New("pinned memory changed")
 )
 
-type Draft struct {
-	Layer           memory.Layer           `json:"layer"`
-	Kind            memory.Kind            `json:"kind"`
-	Scope           memory.Scope           `json:"scope"`
-	Namespace       string                 `json:"namespace"`
-	SlotKey         string                 `json:"slot_key,omitempty"`
-	Entity          memory.EntityRef       `json:"entity,omitempty"`
-	CanonicalText   string                 `json:"canonical_text"`
-	StructuredValue memory.StructuredValue `json:"structured_value"`
-	ContentHash     string                 `json:"content_hash"`
-	Authority       memory.Authority       `json:"authority"`
-	Confidence      float64                `json:"confidence"`
-	Salience        float64                `json:"salience"`
-	Source          memory.SourceRef       `json:"source"`
-	ExpiresAt       *time.Time             `json:"expires_at,omitempty"`
-}
-
-func (d *Draft) Normalize() error {
-	if d == nil {
-		return ErrInvalidCaptureData
-	}
-	text, value, hash, err := memory.NormalizeContent(d.CanonicalText, d.StructuredValue)
-	if err != nil {
-		return err
-	}
-	d.CanonicalText, d.StructuredValue, d.ContentHash = text, value, hash
-	if d.Namespace == "" || d.Authority.Rank() == 0 || d.Confidence < 0 || d.Confidence > 1 || d.Salience < 0 || d.Salience > 1 {
-		return ErrInvalidCaptureData
-	}
-	return nil
-}
+type Draft = memory.MemoryDraft
 
 type PolicyResult struct {
 	Action         memory.PolicyAction `json:"action"`
@@ -69,28 +40,35 @@ type ReviewState struct {
 	PayloadRef          string           `json:"payload_ref,omitempty"`
 }
 
-type CaptureData struct {
-	Owner       memory.Owner       `json:"owner"`
-	Query       string             `json:"query"`
-	Pinned      []memory.MemoryRef `json:"pinned,omitempty"`
-	Draft       *Draft             `json:"draft,omitempty"`
-	Policy      *PolicyResult      `json:"policy,omitempty"`
-	Review      *ReviewState       `json:"review,omitempty"`
-	Committed   *memory.MemoryRef  `json:"committed,omitempty"`
-	RecallStats *RecallStats       `json:"recall_stats,omitempty"`
+type CandidateRef struct {
+	Memory      memory.MemoryRef   `json:"memory"`
+	MatchSource memory.MatchSource `json:"match_source"`
 }
 
-type RecallStats struct {
-	Scanned, ObsoleteFiltered int
-	DegradationReason         string
+type CandidateStats struct {
+	Matched  int `json:"matched"`
+	Reloaded int `json:"reloaded"`
+}
+
+type CaptureData struct {
+	Owner          memory.Owner           `json:"owner"`
+	Query          string                 `json:"query"`
+	Intent         memory.IntentAuthority `json:"intent,omitempty"`
+	Candidates     []CandidateRef         `json:"candidates,omitempty"`
+	CandidateStats *CandidateStats        `json:"candidate_stats,omitempty"`
+	Draft          *Draft                 `json:"draft,omitempty"`
+	Policy         *PolicyResult          `json:"policy,omitempty"`
+	Review         *ReviewState           `json:"review,omitempty"`
+	Committed      *memory.MemoryRef      `json:"committed,omitempty"`
 }
 
 func (d CaptureData) Validate() error {
-	if !d.Owner.Valid() || len(d.Query) > 4096 || len(d.Pinned) > 20 {
+	if !d.Owner.Valid() || len(d.Query) > 4096 || len(d.Candidates) > memory.MaxExactQuerySelectors {
 		return ErrInvalidCaptureData
 	}
-	for _, ref := range d.Pinned {
-		if ref.ID == "" || ref.LineageVersion == 0 || len(ref.ContentHash) != 64 {
+	for _, candidate := range d.Candidates {
+		ref := candidate.Memory
+		if ref.ID == "" || ref.LineageVersion == 0 || len(ref.ContentHash) != 64 || candidate.MatchSource.Priority() == 0 {
 			return ErrInvalidCaptureData
 		}
 	}
@@ -174,7 +152,7 @@ type DraftExtractor interface {
 	ExtractMemoryDraft(context.Context, memory.Owner, string) (Draft, error)
 }
 type ConflictResolver interface {
-	ResolveMemoryConflict(context.Context, memory.Owner, Draft) (PolicyResult, error)
+	ResolveMemoryConflict(context.Context, memory.Owner, Draft, []memory.Record, memory.IntentAuthority) (PolicyResult, error)
 }
 type EditLoader interface {
 	LoadEditedMemoryDraft(context.Context, memory.Owner, string) (Draft, error)
@@ -194,19 +172,22 @@ func (n RecallNode) Execute(ctx context.Context, input workflow.NodeInput[Captur
 	if n.Now != nil {
 		now = n.Now().UTC()
 	}
-	if err := ValidatePinned(ctx, input.State.Data.Owner, input.State.Data.Pinned, nil); err != nil {
-		return workflow.NodeResult[CaptureData]{}, err
+	refs := make([]memory.MemoryRef, 0, len(input.State.Data.Candidates))
+	for _, candidate := range input.State.Data.Candidates {
+		refs = append(refs, candidate.Memory)
 	}
-	result, err := n.Service.Recall(ctx, memory.RecallRequest{Owner: input.State.Data.Owner, Query: input.State.Data.Query, Scope: memory.Scope{Type: memory.ScopeUser}, Pinned: input.State.Data.Pinned}, now)
+	result, err := n.Service.Recall(ctx, memory.RecallRequest{Owner: input.State.Data.Owner, Query: input.State.Data.Query, Scope: memory.Scope{Type: memory.ScopeUser}, Pinned: refs}, now)
 	if err != nil {
 		return workflow.NodeResult[CaptureData]{}, err
 	}
-	refs := make([]memory.MemoryRef, 0, len(result.Items))
+	returnedRefs := make([]memory.MemoryRef, 0, len(result.Items))
 	for _, item := range result.Items {
-		refs = append(refs, item.Memory.Ref())
+		returnedRefs = append(returnedRefs, item.Memory.Ref())
 	}
-	input.State.Data.Pinned = refs
-	input.State.Data.RecallStats = &RecallStats{Scanned: result.Scanned, ObsoleteFiltered: result.ObsoleteFiltered, DegradationReason: result.DegradationReason}
+	input.State.Data.Candidates = make([]CandidateRef, 0, len(returnedRefs))
+	for _, ref := range returnedRefs {
+		input.State.Data.Candidates = append(input.State.Data.Candidates, CandidateRef{Memory: ref, MatchSource: memory.MatchPinned})
+	}
 	return workflow.NodeResult[CaptureData]{State: input.State, Directive: workflow.DirectiveContinue}, nil
 }
 
@@ -228,27 +209,79 @@ func (n ExtractNode) Execute(ctx context.Context, input workflow.NodeInput[Captu
 	return workflow.NodeResult[CaptureData]{State: input.State, Directive: workflow.DirectiveContinue}, nil
 }
 
-type ConflictNode struct{ Resolver ConflictResolver }
+type ExactCandidateLookupNode struct {
+	Repository    memory.Repository
+	Now           func() time.Time
+	MaxCandidates int
+}
+
+func (ExactCandidateLookupNode) ID() workflow.NodeID { return "memory-exact-candidate-lookup" }
+func (n ExactCandidateLookupNode) Execute(ctx context.Context, input workflow.NodeInput[CaptureData]) (workflow.NodeResult[CaptureData], error) {
+	if n.Repository == nil || input.State.Data.Draft == nil {
+		return workflow.NodeResult[CaptureData]{}, ErrInvalidCaptureData
+	}
+	now := time.Now().UTC()
+	if n.Now != nil {
+		now = n.Now().UTC()
+	}
+	limit := n.MaxCandidates
+	if limit == 0 {
+		limit = 40
+	}
+	if limit < 1 || limit > 200 {
+		return workflow.NodeResult[CaptureData]{}, ErrInvalidCaptureData
+	}
+	refs, err := lookupExactCandidates(ctx, n.Repository, input.State.Data.Owner, *input.State.Data.Draft, now, limit)
+	if err != nil {
+		return workflow.NodeResult[CaptureData]{}, err
+	}
+	input.State.Data.Candidates = refs
+	input.State.Data.CandidateStats = &CandidateStats{Matched: len(refs)}
+	return workflow.NodeResult[CaptureData]{State: input.State, Directive: workflow.DirectiveContinue}, nil
+}
+
+type ConflictNode struct {
+	Resolver   ConflictResolver
+	Repository memory.Repository
+	Now        func() time.Time
+}
 
 func (ConflictNode) ID() workflow.NodeID { return "memory-conflict" }
 func (n ConflictNode) Execute(ctx context.Context, input workflow.NodeInput[CaptureData]) (workflow.NodeResult[CaptureData], error) {
-	if n.Resolver == nil || input.State.Data.Draft == nil {
+	if n.Resolver == nil || n.Repository == nil || input.State.Data.Draft == nil {
 		return workflow.NodeResult[CaptureData]{}, ErrInvalidCaptureData
 	}
-	policy, err := n.Resolver.ResolveMemoryConflict(ctx, input.State.Data.Owner, *input.State.Data.Draft)
+	now := time.Now().UTC()
+	if n.Now != nil {
+		now = n.Now().UTC()
+	}
+	records, err := reloadCandidates(ctx, n.Repository, input.State.Data.Owner, input.State.Data.Candidates, now)
+	if err != nil {
+		return workflow.NodeResult[CaptureData]{}, err
+	}
+	intent := input.State.Data.Intent
+	if intent == "" {
+		intent = memory.IntentUserStatement
+	}
+	policy, err := n.Resolver.ResolveMemoryConflict(ctx, input.State.Data.Owner, *input.State.Data.Draft, records, intent)
 	if err != nil {
 		return workflow.NodeResult[CaptureData]{}, err
 	}
 	input.State.Data.Policy = &policy
+	if input.State.Data.CandidateStats == nil {
+		input.State.Data.CandidateStats = &CandidateStats{}
+	}
+	input.State.Data.CandidateStats.Reloaded = len(records)
 	return workflow.NodeResult[CaptureData]{State: input.State, Directive: workflow.DirectiveContinue}, nil
 }
 
 type ReviewNode struct {
-	Repository memory.Repository
-	Resolver   ConflictResolver
-	EditLoader EditLoader
-	Now        func() time.Time
-	TTL        time.Duration
+	Repository    memory.Repository
+	Resolver      ConflictResolver
+	EditLoader    EditLoader
+	Now           func() time.Time
+	TTL           time.Duration
+	MaxCandidates int
 }
 
 func (ReviewNode) ID() workflow.NodeID { return "memory-review" }
@@ -264,6 +297,19 @@ func (n ReviewNode) Execute(ctx context.Context, input workflow.NodeInput[Captur
 		return workflow.NodeResult[CaptureData]{}, ErrInvalidCaptureData
 	}
 	if input.Resume == nil {
+		if input.State.Data.Policy != nil && input.State.Data.Policy.Action == memory.ActionNoop {
+			targetID := input.State.Data.Policy.TargetMemoryID
+			values, err := n.Repository.BatchGet(ctx, input.State.Data.Owner, []string{targetID})
+			if err != nil {
+				return workflow.NodeResult[CaptureData]{}, err
+			}
+			if len(values) != 1 || !values[0].IsActiveAt(now) {
+				return workflow.NodeResult[CaptureData]{}, ErrPinnedMemoryChanged
+			}
+			ref := values[0].Ref()
+			input.State.Data.Committed = &ref
+			return workflow.NodeResult[CaptureData]{State: input.State, Directive: workflow.DirectiveContinue}, nil
+		}
 		result, err := n.createCandidate(ctx, input, input.State.Data.Draft, nil, now, 0)
 		if err != nil {
 			return workflow.NodeResult[CaptureData]{}, err
@@ -271,7 +317,7 @@ func (n ReviewNode) Execute(ctx context.Context, input workflow.NodeInput[Captur
 		input.State.Data.Review = &ReviewState{Candidate: result.Memory.Ref(), CandidateRowVersion: result.Memory.RowVersion, WaitVersion: 1}
 		return n.suspend(input.State, now)
 	}
-	if err := ValidatePinned(ctx, input.State.Data.Owner, input.State.Data.Pinned, n.Repository); err != nil {
+	if _, err := reloadCandidates(ctx, n.Repository, input.State.Data.Owner, input.State.Data.Candidates, now); err != nil {
 		return workflow.NodeResult[CaptureData]{}, err
 	}
 	actor, ok := workflow.ResolvedActorFromContext(ctx)
@@ -281,6 +327,18 @@ func (n ReviewNode) Execute(ctx context.Context, input workflow.NodeInput[Captur
 	review := input.State.Data.Review
 	if review == nil {
 		return workflow.NodeResult[CaptureData]{}, ErrInvalidCaptureData
+	}
+	reviewRecords, err := n.Repository.BatchGet(ctx, input.State.Data.Owner, []string{review.Candidate.ID})
+	if err != nil {
+		return workflow.NodeResult[CaptureData]{}, err
+	}
+	if len(reviewRecords) != 1 || reviewRecords[0].LineageVersion != review.Candidate.LineageVersion || reviewRecords[0].ContentHash != review.Candidate.ContentHash {
+		return workflow.NodeResult[CaptureData]{}, ErrPinnedMemoryChanged
+	}
+	reviewRecord := reviewRecords[0]
+	alreadyResolved := (input.Resume.Action == workflow.ActionApprove && reviewRecord.Status == memory.StatusActive) || (input.Resume.Action == workflow.ActionReject && reviewRecord.Status == memory.StatusRejected)
+	if !(reviewRecord.Status == memory.StatusCandidate && reviewRecord.RowVersion == review.CandidateRowVersion) && !(alreadyResolved && reviewRecord.RowVersion == review.CandidateRowVersion+1) {
+		return workflow.NodeResult[CaptureData]{}, ErrPinnedMemoryChanged
 	}
 	review.ActorType, review.ActorID = actor.Type, actor.ID
 	switch input.Resume.Action {
@@ -301,20 +359,34 @@ func (n ReviewNode) Execute(ctx context.Context, input workflow.NodeInput[Captur
 		if err := edited.Normalize(); err != nil {
 			return workflow.NodeResult[CaptureData]{}, err
 		}
-		oldRecords, err := n.Repository.BatchGet(ctx, input.State.Data.Owner, []string{review.Candidate.ID})
-		if err != nil || len(oldRecords) != 1 {
-			return workflow.NodeResult[CaptureData]{}, ErrPinnedMemoryChanged
+		limit := n.MaxCandidates
+		if limit == 0 {
+			limit = 40
 		}
-		result, err := n.createCandidate(ctx, input, &edited, &oldRecords[0], now, 1)
+		candidateRefs, err := lookupExactCandidates(ctx, n.Repository, input.State.Data.Owner, edited, now, limit)
 		if err != nil {
 			return workflow.NodeResult[CaptureData]{}, err
 		}
-		policy, err := n.Resolver.ResolveMemoryConflict(ctx, input.State.Data.Owner, edited)
+		candidateRecords, err := reloadCandidates(ctx, n.Repository, input.State.Data.Owner, candidateRefs, now)
+		if err != nil {
+			return workflow.NodeResult[CaptureData]{}, err
+		}
+		intent := input.State.Data.Intent
+		if intent == "" {
+			intent = memory.IntentUserStatement
+		}
+		policy, err := n.Resolver.ResolveMemoryConflict(ctx, input.State.Data.Owner, edited, candidateRecords, intent)
+		if err != nil {
+			return workflow.NodeResult[CaptureData]{}, err
+		}
+		result, err := n.createCandidate(ctx, input, &edited, &reviewRecord, now, 1)
 		if err != nil {
 			return workflow.NodeResult[CaptureData]{}, err
 		}
 		input.State.Data.Draft = &edited
 		input.State.Data.Policy = &policy
+		input.State.Data.Candidates = candidateRefs
+		input.State.Data.CandidateStats = &CandidateStats{Matched: len(candidateRefs), Reloaded: len(candidateRecords)}
 		input.State.Data.Review = &ReviewState{Candidate: result.Memory.Ref(), CandidateRowVersion: result.Memory.RowVersion, WaitVersion: review.WaitVersion + 1, PayloadRef: input.Resume.PayloadRef}
 		return n.suspend(input.State, now)
 	default:
@@ -329,6 +401,22 @@ func (n ReviewNode) createCandidate(ctx context.Context, input workflow.NodeInpu
 		record.LineageVersion = old.LineageVersion + 1
 		record.SupersedesID = old.ID
 		targets = append(targets, memory.MutationTarget{ID: old.ID, ExpectedRowVersion: old.RowVersion, NewStatus: memory.StatusRejected})
+	}
+	if input.State.Data.Policy != nil && input.State.Data.Policy.Action == memory.ActionSupersede {
+		targetID := input.State.Data.Policy.TargetMemoryID
+		values, err := n.Repository.BatchGet(ctx, input.State.Data.Owner, []string{targetID})
+		if err != nil {
+			return memory.MutationResult{}, err
+		}
+		if len(values) != 1 || !values[0].IsActiveAt(now) {
+			return memory.MutationResult{}, ErrPinnedMemoryChanged
+		}
+		target := values[0]
+		if old == nil {
+			record.LineageID = target.LineageID
+			record.LineageVersion = target.LineageVersion + 1
+		}
+		record.SupersedesID = target.ID
 	}
 	return n.Repository.CommitMutation(ctx, memory.Mutation{Owner: record.Owner, NewMemory: &record, Targets: targets, Actor: "workflow", ReasonCode: "review_candidate", IdempotencyKey: fmt.Sprintf("%s:%d", input.ExecutionID, index), InputHash: record.ContentHash, OccurredAt: now})
 }
@@ -345,7 +433,13 @@ type CommitNode struct {
 
 func (CommitNode) ID() workflow.NodeID { return "memory-commit" }
 func (n CommitNode) Execute(ctx context.Context, input workflow.NodeInput[CaptureData]) (workflow.NodeResult[CaptureData], error) {
-	if n.Repository == nil || input.State.Data.Review == nil {
+	if n.Repository == nil {
+		return workflow.NodeResult[CaptureData]{}, ErrInvalidCaptureData
+	}
+	if input.State.Data.Review == nil && input.State.Data.Committed != nil && input.State.Data.Policy != nil && input.State.Data.Policy.Action == memory.ActionNoop {
+		return workflow.NodeResult[CaptureData]{State: input.State, Directive: workflow.DirectiveContinue}, nil
+	}
+	if input.State.Data.Review == nil {
 		return workflow.NodeResult[CaptureData]{}, ErrInvalidCaptureData
 	}
 	now := time.Now().UTC()
@@ -362,7 +456,21 @@ func (n CommitNode) Execute(ctx context.Context, input workflow.NodeInput[Captur
 	default:
 		return workflow.NodeResult[CaptureData]{}, ErrInvalidCaptureData
 	}
-	result, err := n.Repository.TransitionMemory(ctx, input.State.Data.Owner, review.Candidate.ID, review.CandidateRowVersion, status, review.ActorType+":"+review.ActorID, "user_review", input.ExecutionID+":0", review.Candidate.ContentHash, now)
+	var result memory.MutationResult
+	var err error
+	if status == memory.StatusActive && input.State.Data.Policy != nil && input.State.Data.Policy.Action == memory.ActionSupersede {
+		targetID := input.State.Data.Policy.TargetMemoryID
+		values, loadErr := n.Repository.BatchGet(ctx, input.State.Data.Owner, []string{targetID})
+		if loadErr != nil {
+			return workflow.NodeResult[CaptureData]{}, loadErr
+		}
+		if len(values) != 1 || !values[0].IsActiveAt(now) {
+			return workflow.NodeResult[CaptureData]{}, ErrPinnedMemoryChanged
+		}
+		result, err = n.Repository.ActivateCandidateSuperseding(ctx, memory.CandidateActivation{Owner: input.State.Data.Owner, CandidateID: review.Candidate.ID, CandidateVersion: review.CandidateRowVersion, SupersededID: targetID, TargetVersion: values[0].RowVersion, Actor: review.ActorType + ":" + review.ActorID, ReasonCode: "user_correction", IdempotencyKey: input.ExecutionID + ":0", InputHash: review.Candidate.ContentHash, OccurredAt: now})
+	} else {
+		result, err = n.Repository.TransitionMemory(ctx, input.State.Data.Owner, review.Candidate.ID, review.CandidateRowVersion, status, review.ActorType+":"+review.ActorID, "user_review", input.ExecutionID+":0", review.Candidate.ContentHash, now)
+	}
 	if err != nil {
 		return workflow.NodeResult[CaptureData]{}, err
 	}
@@ -371,33 +479,77 @@ func (n CommitNode) Execute(ctx context.Context, input workflow.NodeInput[Captur
 	return workflow.NodeResult[CaptureData]{State: input.State, Directive: workflow.DirectiveContinue}, nil
 }
 
-func ValidatePinned(ctx context.Context, owner memory.Owner, refs []memory.MemoryRef, repository memory.Repository) error {
-	if len(refs) == 0 {
-		return nil
+func lookupExactCandidates(ctx context.Context, repository memory.Repository, owner memory.Owner, draft Draft, now time.Time, limit int) ([]CandidateRef, error) {
+	if repository == nil || !owner.Valid() || limit < 1 || limit > 200 {
+		return nil, ErrInvalidCaptureData
 	}
-	if repository == nil {
-		return nil
+	copyDraft := draft
+	if err := copyDraft.Normalize(); err != nil {
+		return nil, err
+	}
+	query := memory.ExactQuery{Owner: owner, Scope: copyDraft.Scope, Layers: []memory.Layer{copyDraft.Layer}, Kinds: []memory.Kind{copyDraft.Kind}, ActiveAt: &now, ContentHashes: []string{copyDraft.ContentHash}, Limit: limit}
+	if copyDraft.SlotKey != "" {
+		query.Slots = []memory.SlotSelector{{Namespace: copyDraft.Namespace, SlotKey: copyDraft.SlotKey}}
+	}
+	if !copyDraft.Entity.Empty() {
+		query.Entities = []memory.EntityRef{copyDraft.Entity}
+	}
+	values, err := repository.FindExact(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	refs := make([]CandidateRef, 0, len(values))
+	for _, value := range values {
+		source := memory.MatchHash
+		if value.Namespace == copyDraft.Namespace && value.SlotKey != "" && value.SlotKey == copyDraft.SlotKey {
+			source = memory.MatchSlot
+		}
+		if !copyDraft.Entity.Empty() && value.Entity == copyDraft.Entity {
+			source = memory.MatchEntity
+		}
+		refs = append(refs, CandidateRef{Memory: value.Ref(), MatchSource: source})
+	}
+	sort.SliceStable(refs, func(i, j int) bool {
+		if refs[i].MatchSource.Priority() != refs[j].MatchSource.Priority() {
+			return refs[i].MatchSource.Priority() > refs[j].MatchSource.Priority()
+		}
+		return refs[i].Memory.ID < refs[j].Memory.ID
+	})
+	if len(refs) > limit {
+		refs = refs[:limit]
+	}
+	return refs, nil
+}
+
+func reloadCandidates(ctx context.Context, repository memory.Repository, owner memory.Owner, refs []CandidateRef, now time.Time) ([]memory.Record, error) {
+	if len(refs) == 0 {
+		return []memory.Record{}, nil
+	}
+	if repository == nil || !owner.Valid() || len(refs) > memory.MaxExactQuerySelectors {
+		return nil, ErrInvalidCaptureData
 	}
 	ids := make([]string, len(refs))
-	for i, ref := range refs {
-		ids[i] = ref.ID
+	for i, candidate := range refs {
+		ids[i] = candidate.Memory.ID
 	}
 	values, err := repository.BatchGet(ctx, owner, ids)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	byID := map[string]memory.Record{}
-	for _, v := range values {
-		byID[v.ID] = v
+	for _, value := range values {
+		byID[value.ID] = value
 	}
-	now := time.Now().UTC()
-	for _, ref := range refs {
-		v, ok := byID[ref.ID]
-		if !ok || !v.IsActiveAt(now) || v.LineageVersion != ref.LineageVersion || v.ContentHash != ref.ContentHash {
-			return ErrPinnedMemoryChanged
+	result := make([]memory.Record, 0, len(refs))
+	for _, candidate := range refs {
+		ref := candidate.Memory
+		value, ok := byID[ref.ID]
+		if !ok || !value.IsActiveAt(now) || value.LineageVersion != ref.LineageVersion || value.ContentHash != ref.ContentHash {
+			return nil, ErrPinnedMemoryChanged
 		}
+		result = append(result, value)
 	}
-	return nil
+	return result, nil
 }
 
 func draftRecord(owner memory.Owner, d Draft, now time.Time) memory.Record {
@@ -405,13 +557,13 @@ func draftRecord(owner memory.Owner, d Draft, now time.Time) memory.Record {
 }
 
 type Nodes struct {
-	Recall   RecallNode
-	Extract  ExtractNode
-	Conflict ConflictNode
-	Review   ReviewNode
-	Commit   CommitNode
+	Extract              ExtractNode
+	ExactCandidateLookup ExactCandidateLookupNode
+	Conflict             ConflictNode
+	Review               ReviewNode
+	Commit               CommitNode
 }
 
 func (n Nodes) List() []workflow.Node[CaptureData] {
-	return []workflow.Node[CaptureData]{n.Recall, n.Extract, n.Conflict, n.Review, n.Commit}
+	return []workflow.Node[CaptureData]{n.Extract, n.ExactCandidateLookup, n.Conflict, n.Review, n.Commit}
 }

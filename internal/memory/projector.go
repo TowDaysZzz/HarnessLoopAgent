@@ -51,6 +51,13 @@ func (p *Projector) RunBatch(ctx context.Context, now time.Time) (ProjectionBatc
 	}
 	result := ProjectionBatchResult{Claimed: len(claimed)}
 	for _, projection := range claimed {
+		if projection.ModelVersion != p.config.ModelVersion {
+			if err := p.repository.FailProjection(ctx, projection.Owner, projection.ID, "projection_version_mismatch", now, true); err != nil {
+				return result, err
+			}
+			result.PermanentFailed++
+			continue
+		}
 		values, err := p.repository.BatchGet(ctx, projection.Owner, []string{projection.MemoryID})
 		if err != nil {
 			permanent := projection.Attempt >= p.config.MaxAttempts

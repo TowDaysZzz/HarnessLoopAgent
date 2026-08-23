@@ -137,6 +137,22 @@ func (r *DurableRuntime[T]) Resume(ctx context.Context, owner WorkflowOwner, act
 	return r.execute(ctx, owner, claimed, claimedState, &command, actor)
 }
 
+func (r *DurableRuntime[T]) Get(ctx context.Context, owner WorkflowOwner, runID WorkflowRunID) (RunResult[T], error) {
+	stored, err := r.store.GetRun(ctx, owner, runID)
+	if err != nil {
+		return RunResult[T]{}, err
+	}
+	state, err := DecodeCheckpoint(stored.Checkpoint, r.definition, r.codec)
+	if err != nil {
+		return RunResult[T]{Status: stored.Checkpoint.Control.Status}, err
+	}
+	return RunResult[T]{State: state, Status: state.Control.Status}, nil
+}
+
+func (r *DurableRuntime[T]) GetCurrentWait(ctx context.Context, owner WorkflowOwner, runID WorkflowRunID) (StoredWait, error) {
+	return r.store.GetCurrentWait(ctx, owner, runID)
+}
+
 func (r *DurableRuntime[T]) Renew(ctx context.Context, owner WorkflowOwner, runID WorkflowRunID, token string) error {
 	now := r.now().UTC()
 	return r.store.RenewClaim(ctx, RenewClaimRequest{Owner: owner, RunID: runID, Token: token, Now: now, Until: now.Add(r.leaseDuration)})

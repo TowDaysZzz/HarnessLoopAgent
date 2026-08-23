@@ -35,7 +35,34 @@ func (s *Store) Migrate(ctx context.Context) error {
 			}
 		}
 	}
-	return s.ensureChatSessionOwnership(ctx)
+	if err := s.ensureChatSessionOwnership(ctx); err != nil {
+		return err
+	}
+	return s.ensureMemoryExactIndexes(ctx)
+}
+
+func (s *Store) ensureMemoryExactIndexes(ctx context.Context) error {
+	indexes := []struct {
+		name    string
+		columns string
+	}{
+		{name: "idx_memory_exact_slot_active", columns: "tenant_id,user_id,scope_type,scope_id,namespace,slot_key,status,expires_at"},
+		{name: "idx_memory_exact_entity_active", columns: "tenant_id,user_id,scope_type,scope_id,entity_type,entity_id,status,expires_at"},
+		{name: "idx_memory_exact_hash_active", columns: "tenant_id,user_id,scope_type,scope_id,content_hash,status,expires_at"},
+	}
+	for _, index := range indexes {
+		var count int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='memory_records' AND INDEX_NAME=?`, index.name).Scan(&count); err != nil {
+			return fmt.Errorf("inspect memory index %s: %w", index.name, err)
+		}
+		if count != 0 {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, "ALTER TABLE memory_records ADD INDEX "+index.name+" ("+index.columns+")"); err != nil {
+			return fmt.Errorf("add memory index %s: %w", index.name, err)
+		}
+	}
+	return nil
 }
 
 func (s *Store) ensureChatSessionOwnership(ctx context.Context) error {

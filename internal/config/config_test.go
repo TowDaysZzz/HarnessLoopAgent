@@ -300,8 +300,43 @@ func TestMemoryConfigDefaultsAreSafeAndDisabled(t *testing.T) {
 	if cfg.Memory.Enabled || cfg.Memory.RAGEnabled || cfg.Memory.ProjectionEnabled || cfg.Memory.WorkflowPilotEnabled {
 		t.Fatalf("memory switches must default off: %+v", cfg.Memory)
 	}
+	if cfg.Memory.RecallMode != "exact-only" || cfg.Memory.StructuredPlanMinConfidence != .75 || cfg.Memory.MaxRecallSelectors != 8 || cfg.Memory.MaxExactCandidates != 40 || cfg.Memory.MaxLLMRepairAttempts != 1 {
+		t.Fatalf("memory exact defaults=%+v", cfg.Memory)
+	}
 	if cfg.Memory.RecallPageSize != 20 || cfg.Memory.MaxScanned != 200 || cfg.Memory.DefaultSessionTTL != 24*time.Hour || cfg.Memory.ProjectionMaxBackoff != 5*time.Minute {
 		t.Fatalf("memory defaults=%+v", cfg.Memory)
+	}
+}
+
+func TestLoadMySQLOnlyMemoryPilotConfig(t *testing.T) {
+	clearOverrides(t)
+	path := writeConfig(t, `MODEL_NAME: test
+MODEL_API_KEY: key
+DATABASE:
+  ENABLED: true
+  DSN: user:pass@tcp(localhost:3306)/test
+MEMORY:
+  ENABLED: true
+  RAG_ENABLED: false
+  PROJECTION_ENABLED: false
+  WORKFLOW_PILOT_ENABLED: true
+  RECALL_MODE: exact-only
+  STRUCTURED_PLAN_MIN_CONFIDENCE: 0.82
+  MAX_RECALL_SELECTORS: 6
+  MAX_EXACT_CANDIDATES: 24
+  MAX_CANDIDATE_TEXT_CHARS: 9000
+  MAX_LLM_RESPONSE_BYTES: 8192
+  MAX_LLM_REPAIR_ATTEMPTS: 2
+`)
+	cfg, err := LoadWithOptions(LoadOptions{Path: path})
+	if err != nil {
+		t.Fatalf("MySQL-only Memory Pilot must be legal: %v", err)
+	}
+	if !cfg.Memory.Enabled || cfg.Memory.RAGEnabled || cfg.Memory.ProjectionEnabled || !cfg.Memory.WorkflowPilotEnabled || cfg.Memory.RecallMode != "exact-only" {
+		t.Fatalf("memory switches=%+v", cfg.Memory)
+	}
+	if cfg.Memory.StructuredPlanMinConfidence != .82 || cfg.Memory.MaxRecallSelectors != 6 || cfg.Memory.MaxExactCandidates != 24 || cfg.Memory.MaxCandidateTextChars != 9000 || cfg.Memory.MaxLLMResponseBytes != 8192 || cfg.Memory.MaxLLMRepairAttempts != 2 {
+		t.Fatalf("memory structured boundaries=%+v", cfg.Memory)
 	}
 }
 
@@ -370,6 +405,16 @@ MEMORY:
 `,
 		"invalid scan": `MEMORY:
   MAX_SCANNED: 1
+`,
+		"semantic mode without rag": `DATABASE:
+  ENABLED: true
+  DSN: mysql
+MEMORY:
+  ENABLED: true
+  RECALL_MODE: exact-plus-semantic
+`,
+		"invalid selector limit": `MEMORY:
+  MAX_RECALL_SELECTORS: 0
 `,
 	}
 	for name, fragment := range tests {

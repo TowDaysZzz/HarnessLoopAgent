@@ -4,7 +4,7 @@
 
 ## 当前里程碑
 
-仓库已完成 Agent 初始化、RAG 接入、HarnessRuntime 稳定性/证据治理，会话、消息、Agent Run、持久化事件、可恢复 SSE，以及第一版 BFF 认证和笔记新增/查询/删除链路。长期记忆、洞察工作流和前端仍在后续阶段。
+仓库已完成 Agent 初始化、RAG 接入、HarnessRuntime 稳定性/证据治理，会话、消息、Agent Run、持久化事件、可恢复 SSE，以及第一版 BFF 认证和笔记新增/查询/删除链路。长期记忆已具备默认关闭的 MySQL-only 显式 Capture/Review/精确召回试点；洞察工作流和更广泛的 Memory 消费仍在后续阶段。
 
 ## 环境要求
 
@@ -100,6 +100,25 @@ RAG:
 
 也可以使用 `RAG_ENABLED`、`RAG_BASE_URL`、`RAG_API_KEY`、`RAG_KB_IDS`、`RAG_TIMEOUT`、`RAG_TOP_K` 和 `RAG_STRATEGY_PROFILE` 覆盖 YAML。`RAG_KB_IDS` 使用逗号分隔，例如 `2,3`，只作为 CLI 或未启用用户绑定场景的兼容默认值；已登录 Web 用户始终使用个人知识库绑定。API Key、知识库 ID 和策略不会暴露为模型可填写的 Tool 参数。
 
+## MySQL-only Memory 试点
+
+Memory 默认关闭。当前生产基线是 `LLM 结构化 + MySQL 精确召回`：MySQL 保存完整事实、状态、版本和冲突关系；不依赖向量库，也不提供开放式语义召回。启用前需要数据库迁移和可用的结构化模型 Runner：
+
+```yaml
+MEMORY:
+  ENABLED: true
+  WORKFLOW_PILOT_ENABLED: true
+  RECALL_MODE: "exact-only"
+  RAG_ENABLED: false
+  PROJECTION_ENABLED: false
+```
+
+Pilot 只识别认证用户显式表达的“记住”或“修改偏好”，并启动与 Chat Run 解耦的耐久 Capture；普通聊天、Tool 结果和节点完成事件不会写入长期 Memory。每次长期写入先进入 Review，用户可批准、拒绝或编辑。控制面详见 `docs/api/agent-memory-api.md`。
+
+exact-only 只按固定 `MemoryRef`、`EntityRef`、`namespace + slot_key`、内容哈希或显式局部 scope 召回；没有稳定 selector 时返回空结果或澄清，不执行 owner 全量扫描。因此它不能达到向量检索的同义改写、模糊描述或跨措辞召回率。
+
+Projection 关闭时，active Memory 仍在同一 MySQL 事务写入 `pending` Outbox，作为未来回填日志；不会调用 RAG、重试或影响 readiness。回滚时先关闭 `WORKFLOW_PILOT_ENABLED`，再关闭 `MEMORY.ENABLED`，重启服务即可；MySQL Memory、审核记录和 Outbox 均保留。当前版本不要直接打开 Memory RAG/Projection；未来 RAG Memory API 和投影 Worker 发布后，再配置独立 Memory endpoint/凭证、保持 Projection Version 一致并消费历史 pending Outbox。这里的 `MEMORY.RAG_ENABLED` 与笔记/认证使用的顶层 `RAG.ENABLED` 是两个独立开关。
+
 ## HarnessRuntime 稳定性
 
 `AGENT` 控制一次完整 Run 的时间和调用预算，`RESILIENCE` 控制模型与 RAG 的重试、并发隔离和熔断。模型只会在流尚未建立时重试；一旦流已开始，中途失败会终止本次 Run，不会重新生成并输出重复内容。RAG 检索是只读操作，只对网络错误、429 和 5xx 临时错误进行有界重试。
@@ -174,6 +193,13 @@ make integration-rag
 ```bash
 MYSQL_INTEGRATION_DSN='user:password@tcp(127.0.0.1:3306)/disposable_db?parseTime=true' \
 make integration-mysql
+```
+
+Memory MySQL-only E2E 使用同一环境变量：
+
+```bash
+MYSQL_INTEGRATION_DSN='user:password@tcp(127.0.0.1:3306)/disposable_db?parseTime=true' \
+go test -v ./internal/memoryworkflow ./internal/platform/mysqlstore
 ```
 
 服务边界、后续阶段和提交顺序记录在 `docs/roadmap.md` 中；RAG HTTP 边界记录在 `docs/adr/0002-rag-http-contract.md` 中。

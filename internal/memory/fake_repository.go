@@ -9,15 +9,20 @@ import (
 )
 
 type FakeRepository struct {
-	mu          sync.Mutex
-	records     map[string]Record
-	idempotency map[string]MutationResult
-	inputHashes map[string]string
-	projections map[string]Projection
+	mu                sync.Mutex
+	records           map[string]Record
+	idempotency       map[string]MutationResult
+	inputHashes       map[string]string
+	projections       map[string]Projection
+	projectionVersion string
 }
 
 func NewFakeRepository() *FakeRepository {
-	return &FakeRepository{records: map[string]Record{}, idempotency: map[string]MutationResult{}, inputHashes: map[string]string{}, projections: map[string]Projection{}}
+	return NewFakeRepositoryWithProjectionVersion("v1")
+}
+
+func NewFakeRepositoryWithProjectionVersion(version string) *FakeRepository {
+	return &FakeRepository{records: map[string]Record{}, idempotency: map[string]MutationResult{}, inputHashes: map[string]string{}, projections: map[string]Projection{}, projectionVersion: version}
 }
 
 func ownerKey(owner Owner, key string) string {
@@ -25,6 +30,12 @@ func ownerKey(owner Owner, key string) string {
 }
 
 func (r *FakeRepository) FindExact(_ context.Context, query ExactQuery) ([]Record, error) {
+	if err := query.Validate(); err != nil {
+		return nil, err
+	}
+	if !query.HasSelector() {
+		return []Record{}, nil
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var out []Record
@@ -32,11 +43,29 @@ func (r *FakeRepository) FindExact(_ context.Context, query ExactQuery) ([]Recor
 		if value.Owner != query.Owner || value.Scope != query.Scope {
 			continue
 		}
-		match := query.ContentHash != "" && value.ContentHash == query.ContentHash
+		if query.ActiveAt != nil && !value.IsActiveAt(*query.ActiveAt) {
+			continue
+		}
+		if len(query.Layers) > 0 && !containsLayer(query.Layers, value.Layer) {
+			continue
+		}
+		if len(query.Kinds) > 0 && !containsKind(query.Kinds, value.Kind) {
+			continue
+		}
+		match := query.ScopeOnly
 		match = match || (query.Namespace != "" && query.SlotKey != "" && value.Namespace == query.Namespace && value.SlotKey == query.SlotKey)
 		match = match || (!query.Entity.Empty() && value.Entity == query.Entity)
+		for _, hash := range query.ContentHashes {
+			match = match || value.ContentHash == hash
+		}
+		for _, slot := range query.Slots {
+			match = match || (value.Namespace == slot.Namespace && value.SlotKey == slot.SlotKey)
+		}
+		for _, entity := range query.Entities {
+			match = match || value.Entity == entity
+		}
 		for _, ref := range query.Refs {
-			if value.ID == ref.ID {
+			if value.ID == ref.ID && value.LineageVersion == ref.LineageVersion && value.ContentHash == ref.ContentHash {
 				match = true
 			}
 		}
@@ -44,11 +73,33 @@ func (r *FakeRepository) FindExact(_ context.Context, query ExactQuery) ([]Recor
 			out = append(out, value)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
 	if query.Limit > 0 && len(out) > query.Limit {
 		out = out[:query.Limit]
 	}
 	return out, nil
+}
+
+func containsLayer(values []Layer, target Layer) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+func containsKind(values []Kind, target Kind) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *FakeRepository) BatchGet(_ context.Context, owner Owner, ids []string) ([]Record, error) {
@@ -126,8 +177,8 @@ func (r *FakeRepository) CommitMutation(_ context.Context, m Mutation) (Mutation
 	value := *m.NewMemory
 	value.CreatedAt, value.UpdatedAt = now, now
 	if value.Status == StatusActive {
-		projectionID := ownerKey(m.Owner, value.ID+":"+value.ContentHash)
-		r.projections[projectionID] = Projection{ID: projectionID, Owner: m.Owner, MemoryID: value.ID, ContentHash: value.ContentHash, Status: ProjectionPending, AvailableAt: now}
+		projectionID := ownerKey(m.Owner, value.ID+":"+value.ContentHash+":"+r.projectionVersion)
+		r.projections[projectionID] = Projection{ID: projectionID, Owner: m.Owner, MemoryID: value.ID, ContentHash: value.ContentHash, ModelVersion: r.projectionVersion, Status: ProjectionPending, AvailableAt: now}
 	}
 	r.records[value.ID] = value
 	result := MutationResult{Memory: value, Relations: append([]Relation(nil), m.Relations...)}
@@ -160,12 +211,52 @@ func (r *FakeRepository) TransitionMemory(ctx context.Context, owner Owner, id s
 	value.Status, value.RowVersion, value.UpdatedAt = to, value.RowVersion+1, now
 	r.records[id] = value
 	if to == StatusActive {
-		projectionID := ownerKey(owner, value.ID+":"+value.ContentHash)
-		r.projections[projectionID] = Projection{ID: projectionID, Owner: owner, MemoryID: value.ID, ContentHash: value.ContentHash, Status: ProjectionPending, AvailableAt: now}
+		projectionID := ownerKey(owner, value.ID+":"+value.ContentHash+":"+r.projectionVersion)
+		r.projections[projectionID] = Projection{ID: projectionID, Owner: owner, MemoryID: value.ID, ContentHash: value.ContentHash, ModelVersion: r.projectionVersion, Status: ProjectionPending, AvailableAt: now}
 	}
 	res := MutationResult{Memory: value}
 	r.idempotency[idem], r.inputHashes[idem] = res, inputHash
 	return res, nil
+}
+
+func (r *FakeRepository) ActivateCandidateSuperseding(_ context.Context, activation CandidateActivation) (MutationResult, error) {
+	if !activation.Owner.Valid() || activation.CandidateID == "" || activation.SupersededID == "" || activation.CandidateID == activation.SupersededID || activation.CandidateVersion == 0 || activation.TargetVersion == 0 || activation.IdempotencyKey == "" || activation.InputHash == "" {
+		return MutationResult{}, ErrInvalidInput
+	}
+	if _, _, err := NormalizeAuditFields(activation.Actor, activation.ReasonCode); err != nil {
+		return MutationResult{}, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	idem := ownerKey(activation.Owner, activation.IdempotencyKey)
+	if existing, ok := r.idempotency[idem]; ok {
+		if r.inputHashes[idem] != activation.InputHash {
+			return MutationResult{}, ErrIdempotencyConflict
+		}
+		existing.Replayed = true
+		return existing, nil
+	}
+	candidate, candidateOK := r.records[activation.CandidateID]
+	target, targetOK := r.records[activation.SupersededID]
+	if !candidateOK || !targetOK || candidate.Owner != activation.Owner || target.Owner != activation.Owner {
+		return MutationResult{}, ErrNotFound
+	}
+	if candidate.RowVersion != activation.CandidateVersion || target.RowVersion != activation.TargetVersion || candidate.Status != StatusCandidate || target.Status != StatusActive || !candidate.Status.CanTransition(StatusActive) || !target.Status.CanTransition(StatusSuperseded) || candidate.SupersedesID != target.ID || candidate.LineageID != target.LineageID || candidate.LineageVersion <= target.LineageVersion {
+		return MutationResult{}, ErrStateConflict
+	}
+	now := activation.OccurredAt.UTC()
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	target.Status, target.SupersededBy, target.RowVersion, target.UpdatedAt = StatusSuperseded, candidate.ID, target.RowVersion+1, now
+	candidate.Status, candidate.RowVersion, candidate.UpdatedAt = StatusActive, candidate.RowVersion+1, now
+	r.records[target.ID], r.records[candidate.ID] = target, candidate
+	projectionID := ownerKey(activation.Owner, candidate.ID+":"+candidate.ContentHash+":"+r.projectionVersion)
+	r.projections[projectionID] = Projection{ID: projectionID, Owner: activation.Owner, MemoryID: candidate.ID, ContentHash: candidate.ContentHash, ModelVersion: r.projectionVersion, Status: ProjectionPending, AvailableAt: now}
+	relations := []Relation{{FromID: candidate.ID, ToID: target.ID, Type: RelationSupersedes, ReasonCode: activation.ReasonCode}}
+	result := MutationResult{Memory: candidate, Relations: relations}
+	r.idempotency[idem], r.inputHashes[idem] = result, activation.InputHash
+	return result, nil
 }
 
 func (r *FakeRepository) Expire(_ context.Context, owner Owner, now time.Time, limit int) (int, error) {
@@ -202,6 +293,18 @@ func (r *FakeRepository) ClaimProjections(_ context.Context, limit int, now time
 		}
 	}
 	return out, nil
+}
+
+func (r *FakeRepository) PendingProjectionCount(_ context.Context) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var count int64
+	for _, projection := range r.projections {
+		if projection.Status == ProjectionPending || projection.Status == ProjectionFailed {
+			count++
+		}
+	}
+	return count, nil
 }
 
 func (r *FakeRepository) CompleteProjection(_ context.Context, owner Owner, id string, now time.Time) error {

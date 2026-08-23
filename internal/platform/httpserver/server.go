@@ -18,7 +18,9 @@ import (
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/chat"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/knowledgebase"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/mcpfacade"
+	"github.com/TowDaysZzz/HarnessLoopAgent/internal/memoryworkflow"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/note"
+	"github.com/TowDaysZzz/HarnessLoopAgent/internal/workflow"
 )
 
 type Server struct {
@@ -28,12 +30,21 @@ type Server struct {
 type Option func(*serverOptions)
 
 type serverOptions struct {
-	chat          *chat.Service
-	auth          *agentauth.Service
-	note          *note.Service
-	mcp           *mcpfacade.Facade
-	knowledgeBase *knowledgebase.Service
-	authCookie    AuthCookieConfig
+	chat            *chat.Service
+	auth            *agentauth.Service
+	note            *note.Service
+	mcp             *mcpfacade.Facade
+	knowledgeBase   *knowledgebase.Service
+	memoryCapture   MemoryCaptureService
+	memoryChatPilot bool
+	authCookie      AuthCookieConfig
+}
+
+type MemoryCaptureService interface {
+	Start(context.Context, memoryworkflow.StartCaptureInput) (memoryworkflow.CaptureDTO, error)
+	Get(context.Context, workflow.WorkflowOwner, workflow.WorkflowRunID) (memoryworkflow.CaptureDTO, error)
+	GetReview(context.Context, workflow.WorkflowOwner, workflow.WorkflowRunID) (memoryworkflow.ReviewDTO, error)
+	Resume(context.Context, memoryworkflow.ResumeCaptureInput) (memoryworkflow.CaptureDTO, error)
 }
 
 type AuthCookieConfig struct {
@@ -65,6 +76,14 @@ func WithKnowledgeBaseService(service *knowledgebase.Service) Option {
 	return func(options *serverOptions) { options.knowledgeBase = service }
 }
 
+func WithMemoryCaptureService(service MemoryCaptureService) Option {
+	return func(options *serverOptions) { options.memoryCapture = service }
+}
+
+func WithMemoryChatIntentPilot(enabled bool) Option {
+	return func(options *serverOptions) { options.memoryChatPilot = enabled }
+}
+
 func New(addr string, ready func() bool, options ...Option) *Server {
 	var configured serverOptions
 	for _, option := range options {
@@ -79,7 +98,11 @@ func New(addr string, ready func() bool, options ...Option) *Server {
 		c.JSON(consts.StatusOK, map[string]string{"status": "ok"})
 	})
 	if configured.chat != nil {
-		registerChatRoutes(h, configured.chat, configured.auth, configured.authCookie, configured.knowledgeBase)
+		var memoryPilot MemoryCaptureService
+		if configured.memoryChatPilot && configured.auth != nil {
+			memoryPilot = configured.memoryCapture
+		}
+		registerChatRoutes(h, configured.chat, configured.auth, configured.authCookie, configured.knowledgeBase, memoryPilot)
 	}
 	if configured.auth != nil {
 		registerAuthRoutes(h, configured.auth, configured.authCookie)
@@ -91,6 +114,9 @@ func New(addr string, ready func() bool, options ...Option) *Server {
 		}
 		if configured.mcp != nil {
 			registerMCPRoute(h, configured.auth, configured.mcp, configured.authCookie)
+		}
+		if configured.memoryCapture != nil {
+			registerMemoryCaptureRoutes(h, configured.auth, configured.memoryCapture, configured.authCookie)
 		}
 	}
 	h.GET("/readyz", func(ctx context.Context, c *app.RequestContext) {
@@ -104,7 +130,7 @@ func New(addr string, ready func() bool, options ...Option) *Server {
 	return &Server{hertz: h}
 }
 
-func registerChatRoutes(h *server.Hertz, service *chat.Service, authService *agentauth.Service, cookie AuthCookieConfig, knowledgeBaseService *knowledgebase.Service) {
+func registerChatRoutes(h *server.Hertz, service *chat.Service, authService *agentauth.Service, cookie AuthCookieConfig, knowledgeBaseService *knowledgebase.Service, memoryPilot MemoryCaptureService) {
 	protect := func(handler app.HandlerFunc) app.HandlerFunc {
 		if authService == nil {
 			return handler
@@ -190,6 +216,9 @@ func registerChatRoutes(h *server.Hertz, service *chat.Service, authService *age
 		if err != nil {
 			writeServiceError(c, err)
 			return
+		}
+		if created.Created && memoryPilot != nil && explicitMemoryIntent(request.Message) {
+			startChatMemoryCapture(memoryPilot, principal, created.Run.ID, request.Message)
 		}
 		status := consts.StatusAccepted
 		if !created.Created {

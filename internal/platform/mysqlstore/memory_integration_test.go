@@ -22,7 +22,7 @@ func openMemoryStore(t *testing.T) (*mysqlstore.Store, context.Context) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
-	store, err := mysqlstore.Open(ctx, mysqlstore.Options{DSN: dsn, MaxOpenConns: 12, MaxIdleConns: 4, ConnMaxLifetime: time.Minute})
+	store, err := mysqlstore.Open(ctx, mysqlstore.Options{DSN: dsn, MaxOpenConns: 12, MaxIdleConns: 4, ConnMaxLifetime: time.Minute, ProjectionVersion: "integration-v1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,6 +84,9 @@ func TestMemoryMigrationAndRepositoryLifecycle(t *testing.T) {
 	}
 	if projection.ID == "" {
 		t.Fatal("active memory projection missing")
+	}
+	if projection.ModelVersion != "integration-v1" {
+		t.Fatalf("projection version=%q", projection.ModelVersion)
 	}
 	if err := store.CompleteProjection(ctx, owner, projection.ID, now); err != nil {
 		t.Fatal(err)
@@ -152,9 +155,33 @@ func TestMemoryCandidateTransitionsAndExpiry(t *testing.T) {
 	if _, err := store.CommitMutation(ctx, memory.Mutation{Owner: owner, NewMemory: &candidate, IdempotencyKey: uuid.NewString(), InputHash: candidate.ContentHash, OccurredAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	activated, err := store.TransitionMemory(ctx, owner, candidate.ID, 1, memory.StatusActive, "user", "approved", uuid.NewString(), candidate.ContentHash, now.Add(time.Second))
+	activateKey := uuid.NewString()
+	activated, err := store.TransitionMemory(ctx, owner, candidate.ID, 1, memory.StatusActive, "user", "approved", activateKey, candidate.ContentHash, now.Add(time.Second))
 	if err != nil || activated.Memory.Status != memory.StatusActive {
 		t.Fatalf("activate=%+v err=%v", activated, err)
+	}
+	replayed, err := store.TransitionMemory(ctx, owner, candidate.ID, 1, memory.StatusActive, "user", "approved", activateKey, candidate.ContentHash, now.Add(time.Second))
+	if err != nil || !replayed.Replayed {
+		t.Fatalf("activation replay=%+v err=%v", replayed, err)
+	}
+	projections, err := store.ClaimProjections(ctx, 20, now.Add(1500*time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+	matching := 0
+	for _, projection := range projections {
+		if projection.MemoryID == candidate.ID {
+			matching++
+			if projection.ModelVersion != "integration-v1" {
+				t.Fatalf("candidate projection version=%q", projection.ModelVersion)
+			}
+			if err := store.CompleteProjection(ctx, owner, projection.ID, now.Add(1500*time.Millisecond)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if matching != 1 {
+		t.Fatalf("candidate projection count=%d all=%+v", matching, projections)
 	}
 	revoked, err := store.TransitionMemory(ctx, owner, candidate.ID, 2, memory.StatusRevoked, "user", "withdrawn", uuid.NewString(), stringsOf('b', 64), now.Add(2*time.Second))
 	if err != nil || revoked.Memory.Status != memory.StatusRevoked {

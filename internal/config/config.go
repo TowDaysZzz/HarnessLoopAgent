@@ -120,26 +120,33 @@ type NoteConfig struct {
 }
 
 type MemoryConfig struct {
-	Enabled               bool
-	RAGEnabled            bool
-	ProjectionEnabled     bool
-	WorkflowPilotEnabled  bool
-	DefaultSessionTTL     time.Duration
-	RecallTarget          int
-	RecallPageSize        int
-	MaxScanned            int
-	MaxBatches            int
-	MaxContextChars       int
-	ConflictThreshold     float64
-	ProjectionBatchSize   int
-	ProjectionBaseBackoff time.Duration
-	ProjectionMaxBackoff  time.Duration
-	ProjectionMaxAttempts int
-	RAGEndpoint           string
-	RAGTimeout            time.Duration
-	RAGServiceToken       string
-	OwnerClaimSecret      string
-	ProjectionVersion     string
+	Enabled                     bool
+	RAGEnabled                  bool
+	ProjectionEnabled           bool
+	WorkflowPilotEnabled        bool
+	RecallMode                  string
+	StructuredPlanMinConfidence float64
+	MaxRecallSelectors          int
+	MaxExactCandidates          int
+	MaxCandidateTextChars       int
+	MaxLLMResponseBytes         int
+	MaxLLMRepairAttempts        int
+	DefaultSessionTTL           time.Duration
+	RecallTarget                int
+	RecallPageSize              int
+	MaxScanned                  int
+	MaxBatches                  int
+	MaxContextChars             int
+	ConflictThreshold           float64
+	ProjectionBatchSize         int
+	ProjectionBaseBackoff       time.Duration
+	ProjectionMaxBackoff        time.Duration
+	ProjectionMaxAttempts       int
+	RAGEndpoint                 string
+	RAGTimeout                  time.Duration
+	RAGServiceToken             string
+	OwnerClaimSecret            string
+	ProjectionVersion           string
 }
 
 type LoadOptions struct {
@@ -238,26 +245,33 @@ type fileNoteConfig struct {
 }
 
 type fileMemoryConfig struct {
-	Enabled               bool    `yaml:"ENABLED"`
-	RAGEnabled            bool    `yaml:"RAG_ENABLED"`
-	ProjectionEnabled     bool    `yaml:"PROJECTION_ENABLED"`
-	WorkflowPilotEnabled  bool    `yaml:"WORKFLOW_PILOT_ENABLED"`
-	DefaultSessionTTL     string  `yaml:"DEFAULT_SESSION_TTL"`
-	RecallTarget          int     `yaml:"RECALL_TARGET"`
-	RecallPageSize        int     `yaml:"RECALL_PAGE_SIZE"`
-	MaxScanned            int     `yaml:"MAX_SCANNED"`
-	MaxBatches            int     `yaml:"MAX_BATCHES"`
-	MaxContextChars       int     `yaml:"MAX_CONTEXT_CHARS"`
-	ConflictThreshold     float64 `yaml:"CONFLICT_THRESHOLD"`
-	ProjectionBatchSize   int     `yaml:"PROJECTION_BATCH_SIZE"`
-	ProjectionBaseBackoff string  `yaml:"PROJECTION_BASE_BACKOFF"`
-	ProjectionMaxBackoff  string  `yaml:"PROJECTION_MAX_BACKOFF"`
-	ProjectionMaxAttempts int     `yaml:"PROJECTION_MAX_ATTEMPTS"`
-	RAGEndpoint           string  `yaml:"RAG_ENDPOINT"`
-	RAGTimeout            string  `yaml:"RAG_TIMEOUT"`
-	RAGServiceToken       string  `yaml:"RAG_SERVICE_TOKEN"`
-	OwnerClaimSecret      string  `yaml:"OWNER_CLAIM_SECRET"`
-	ProjectionVersion     string  `yaml:"PROJECTION_VERSION"`
+	Enabled                     bool    `yaml:"ENABLED"`
+	RAGEnabled                  bool    `yaml:"RAG_ENABLED"`
+	ProjectionEnabled           bool    `yaml:"PROJECTION_ENABLED"`
+	WorkflowPilotEnabled        bool    `yaml:"WORKFLOW_PILOT_ENABLED"`
+	RecallMode                  string  `yaml:"RECALL_MODE"`
+	StructuredPlanMinConfidence float64 `yaml:"STRUCTURED_PLAN_MIN_CONFIDENCE"`
+	MaxRecallSelectors          int     `yaml:"MAX_RECALL_SELECTORS"`
+	MaxExactCandidates          int     `yaml:"MAX_EXACT_CANDIDATES"`
+	MaxCandidateTextChars       int     `yaml:"MAX_CANDIDATE_TEXT_CHARS"`
+	MaxLLMResponseBytes         int     `yaml:"MAX_LLM_RESPONSE_BYTES"`
+	MaxLLMRepairAttempts        int     `yaml:"MAX_LLM_REPAIR_ATTEMPTS"`
+	DefaultSessionTTL           string  `yaml:"DEFAULT_SESSION_TTL"`
+	RecallTarget                int     `yaml:"RECALL_TARGET"`
+	RecallPageSize              int     `yaml:"RECALL_PAGE_SIZE"`
+	MaxScanned                  int     `yaml:"MAX_SCANNED"`
+	MaxBatches                  int     `yaml:"MAX_BATCHES"`
+	MaxContextChars             int     `yaml:"MAX_CONTEXT_CHARS"`
+	ConflictThreshold           float64 `yaml:"CONFLICT_THRESHOLD"`
+	ProjectionBatchSize         int     `yaml:"PROJECTION_BATCH_SIZE"`
+	ProjectionBaseBackoff       string  `yaml:"PROJECTION_BASE_BACKOFF"`
+	ProjectionMaxBackoff        string  `yaml:"PROJECTION_MAX_BACKOFF"`
+	ProjectionMaxAttempts       int     `yaml:"PROJECTION_MAX_ATTEMPTS"`
+	RAGEndpoint                 string  `yaml:"RAG_ENDPOINT"`
+	RAGTimeout                  string  `yaml:"RAG_TIMEOUT"`
+	RAGServiceToken             string  `yaml:"RAG_SERVICE_TOKEN"`
+	OwnerClaimSecret            string  `yaml:"OWNER_CLAIM_SECRET"`
+	ProjectionVersion           string  `yaml:"PROJECTION_VERSION"`
 }
 
 type fileRAGConfig struct {
@@ -424,7 +438,7 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 			CookieName: strings.TrimSpace(raw.Auth.CookieName), CookieSecure: raw.Auth.CookieSecure,
 		},
 		Note:   NoteConfig{Enabled: raw.Note.Enabled, KBID: raw.Note.KBID},
-		Memory: MemoryConfig{Enabled: raw.Memory.Enabled, RAGEnabled: raw.Memory.RAGEnabled, ProjectionEnabled: raw.Memory.ProjectionEnabled, WorkflowPilotEnabled: raw.Memory.WorkflowPilotEnabled, DefaultSessionTTL: memorySessionTTL, RecallTarget: raw.Memory.RecallTarget, RecallPageSize: raw.Memory.RecallPageSize, MaxScanned: raw.Memory.MaxScanned, MaxBatches: raw.Memory.MaxBatches, MaxContextChars: raw.Memory.MaxContextChars, ConflictThreshold: raw.Memory.ConflictThreshold, ProjectionBatchSize: raw.Memory.ProjectionBatchSize, ProjectionBaseBackoff: projectionBaseBackoff, ProjectionMaxBackoff: projectionMaxBackoff, ProjectionMaxAttempts: raw.Memory.ProjectionMaxAttempts, RAGEndpoint: strings.TrimRight(strings.TrimSpace(raw.Memory.RAGEndpoint), "/"), RAGTimeout: memoryRAGTimeout, RAGServiceToken: strings.TrimSpace(raw.Memory.RAGServiceToken), OwnerClaimSecret: strings.TrimSpace(raw.Memory.OwnerClaimSecret), ProjectionVersion: strings.TrimSpace(raw.Memory.ProjectionVersion)},
+		Memory: MemoryConfig{Enabled: raw.Memory.Enabled, RAGEnabled: raw.Memory.RAGEnabled, ProjectionEnabled: raw.Memory.ProjectionEnabled, WorkflowPilotEnabled: raw.Memory.WorkflowPilotEnabled, RecallMode: strings.TrimSpace(raw.Memory.RecallMode), StructuredPlanMinConfidence: raw.Memory.StructuredPlanMinConfidence, MaxRecallSelectors: raw.Memory.MaxRecallSelectors, MaxExactCandidates: raw.Memory.MaxExactCandidates, MaxCandidateTextChars: raw.Memory.MaxCandidateTextChars, MaxLLMResponseBytes: raw.Memory.MaxLLMResponseBytes, MaxLLMRepairAttempts: raw.Memory.MaxLLMRepairAttempts, DefaultSessionTTL: memorySessionTTL, RecallTarget: raw.Memory.RecallTarget, RecallPageSize: raw.Memory.RecallPageSize, MaxScanned: raw.Memory.MaxScanned, MaxBatches: raw.Memory.MaxBatches, MaxContextChars: raw.Memory.MaxContextChars, ConflictThreshold: raw.Memory.ConflictThreshold, ProjectionBatchSize: raw.Memory.ProjectionBatchSize, ProjectionBaseBackoff: projectionBaseBackoff, ProjectionMaxBackoff: projectionMaxBackoff, ProjectionMaxAttempts: raw.Memory.ProjectionMaxAttempts, RAGEndpoint: strings.TrimRight(strings.TrimSpace(raw.Memory.RAGEndpoint), "/"), RAGTimeout: memoryRAGTimeout, RAGServiceToken: strings.TrimSpace(raw.Memory.RAGServiceToken), OwnerClaimSecret: strings.TrimSpace(raw.Memory.OwnerClaimSecret), ProjectionVersion: strings.TrimSpace(raw.Memory.ProjectionVersion)},
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -486,8 +500,11 @@ func (c Config) Validate() error {
 }
 
 func (c MemoryConfig) Validate(databaseEnabled bool) error {
-	if c.DefaultSessionTTL <= 0 || c.RecallTarget < 1 || c.RecallTarget > c.RecallPageSize || c.RecallPageSize < 1 || c.RecallPageSize > 200 || c.MaxScanned < c.RecallPageSize || c.MaxBatches < 1 || c.MaxContextChars < 1 || c.ConflictThreshold < 0 || c.ConflictThreshold > 1 || c.ProjectionBatchSize < 1 || c.ProjectionBatchSize > 200 || c.ProjectionBaseBackoff <= 0 || c.ProjectionMaxBackoff < c.ProjectionBaseBackoff || c.ProjectionMaxAttempts < 1 || c.RAGTimeout <= 0 || c.ProjectionVersion == "" {
+	if c.DefaultSessionTTL <= 0 || c.RecallTarget < 1 || c.RecallTarget > c.RecallPageSize || c.RecallPageSize < 1 || c.RecallPageSize > 200 || c.MaxScanned < c.RecallPageSize || c.MaxBatches < 1 || c.MaxContextChars < 1 || c.ConflictThreshold < 0 || c.ConflictThreshold > 1 || c.ProjectionBatchSize < 1 || c.ProjectionBatchSize > 200 || c.ProjectionBaseBackoff <= 0 || c.ProjectionMaxBackoff < c.ProjectionBaseBackoff || c.ProjectionMaxAttempts < 1 || c.RAGTimeout <= 0 || c.ProjectionVersion == "" || c.StructuredPlanMinConfidence < 0 || c.StructuredPlanMinConfidence > 1 || c.MaxRecallSelectors < 1 || c.MaxRecallSelectors > 32 || c.MaxExactCandidates < 1 || c.MaxExactCandidates > 200 || c.MaxCandidateTextChars < 1 || c.MaxLLMResponseBytes < 256 || c.MaxLLMRepairAttempts < 0 || c.MaxLLMRepairAttempts > 3 {
 		return errors.New("MEMORY limits, durations, thresholds or projection version are invalid")
+	}
+	if c.RecallMode != "exact-only" && c.RecallMode != "exact-plus-semantic" {
+		return errors.New("MEMORY_RECALL_MODE must be exact-only or exact-plus-semantic")
 	}
 	if !c.Enabled {
 		if c.RAGEnabled || c.ProjectionEnabled || c.WorkflowPilotEnabled {
@@ -500,6 +517,9 @@ func (c MemoryConfig) Validate(databaseEnabled bool) error {
 	}
 	if c.ProjectionEnabled && !c.RAGEnabled {
 		return errors.New("MEMORY_PROJECTION_ENABLED requires MEMORY_RAG_ENABLED")
+	}
+	if c.RecallMode == "exact-plus-semantic" && !c.RAGEnabled {
+		return errors.New("MEMORY_RECALL_MODE exact-plus-semantic requires MEMORY_RAG_ENABLED")
 	}
 	if c.RAGEnabled {
 		if c.RAGEndpoint == "" || c.RAGServiceToken == "" || len(c.OwnerClaimSecret) < 32 {
@@ -661,7 +681,7 @@ func defaultFileConfig() fileConfig {
 			MaxInputTokens: 24000, MinRecentMessages: 6, MessageHistoryLimit: 100,
 		},
 		Auth:   fileAuthConfig{SessionTTL: "168h", CookieName: "note_agent_session"},
-		Memory: fileMemoryConfig{DefaultSessionTTL: "24h", RecallTarget: 10, RecallPageSize: 20, MaxScanned: 200, MaxBatches: 10, MaxContextChars: 12000, ConflictThreshold: .8, ProjectionBatchSize: 50, ProjectionBaseBackoff: "1s", ProjectionMaxBackoff: "5m", ProjectionMaxAttempts: 8, RAGTimeout: "10s", ProjectionVersion: "v1"},
+		Memory: fileMemoryConfig{RecallMode: "exact-only", StructuredPlanMinConfidence: .75, MaxRecallSelectors: 8, MaxExactCandidates: 40, MaxCandidateTextChars: 16000, MaxLLMResponseBytes: 16384, MaxLLMRepairAttempts: 1, DefaultSessionTTL: "24h", RecallTarget: 10, RecallPageSize: 20, MaxScanned: 200, MaxBatches: 10, MaxContextChars: 12000, ConflictThreshold: .8, ProjectionBatchSize: 50, ProjectionBaseBackoff: "1s", ProjectionMaxBackoff: "5m", ProjectionMaxAttempts: 8, RAGTimeout: "10s", ProjectionVersion: "v1"},
 	}
 }
 
@@ -754,6 +774,7 @@ func applyServiceEnvironment(raw *fileConfig) error {
 		"MEMORY_RAG_SERVICE_TOKEN":       &raw.Memory.RAGServiceToken,
 		"MEMORY_OWNER_CLAIM_SECRET":      &raw.Memory.OwnerClaimSecret,
 		"MEMORY_PROJECTION_VERSION":      &raw.Memory.ProjectionVersion,
+		"MEMORY_RECALL_MODE":             &raw.Memory.RecallMode,
 	})
 	for key, target := range map[string]*bool{
 		"DATABASE_ENABLED":               &raw.Database.Enabled,
@@ -802,41 +823,47 @@ func applyServiceEnvironment(raw *fileConfig) error {
 		raw.RAG.KBIDs = ids
 	}
 	for key, target := range map[string]*int{
-		"AGENT_MAX_ITERATIONS":           &raw.Agent.MaxIterations,
-		"AGENT_MAX_MODEL_CALLS":          &raw.Agent.MaxModelCalls,
-		"AGENT_MAX_TOOL_CALLS":           &raw.Agent.MaxToolCalls,
-		"AGENT_MAX_REPAIR_ATTEMPTS":      &raw.Agent.MaxRepairAttempts,
-		"AGENT_MAX_OUTPUT_TOKENS":        &raw.Agent.MaxOutputTokens,
-		"INTENT_COMPLEX_THRESHOLD":       &raw.Agent.IntentComplexThreshold,
-		"MODEL_MAX_ATTEMPTS":             &raw.Resilience.ModelMaxAttempts,
-		"RAG_MAX_ATTEMPTS":               &raw.Resilience.RAGMaxAttempts,
-		"MODEL_MAX_CONCURRENCY":          &raw.Resilience.ModelMaxConcurrency,
-		"RAG_MAX_CONCURRENCY":            &raw.Resilience.RAGMaxConcurrency,
-		"CIRCUIT_FAILURE_THRESHOLD":      &raw.Resilience.CircuitFailureThreshold,
-		"GROUNDING_MIN_RESULTS":          &raw.Grounding.MinResults,
-		"GROUNDING_MAX_CONTEXT_CHARS":    &raw.Grounding.MaxContextChars,
-		"DATABASE_MAX_OPEN_CONNS":        &raw.Database.MaxOpenConns,
-		"DATABASE_MAX_IDLE_CONNS":        &raw.Database.MaxIdleConns,
-		"CONTEXT_MAX_INPUT_TOKENS":       &raw.Context.MaxInputTokens,
-		"CONTEXT_MIN_RECENT_MESSAGES":    &raw.Context.MinRecentMessages,
-		"CONTEXT_MESSAGE_HISTORY_LIMIT":  &raw.Context.MessageHistoryLimit,
-		"MEMORY_RECALL_TARGET":           &raw.Memory.RecallTarget,
-		"MEMORY_RECALL_PAGE_SIZE":        &raw.Memory.RecallPageSize,
-		"MEMORY_MAX_SCANNED":             &raw.Memory.MaxScanned,
-		"MEMORY_MAX_BATCHES":             &raw.Memory.MaxBatches,
-		"MEMORY_MAX_CONTEXT_CHARS":       &raw.Memory.MaxContextChars,
-		"MEMORY_PROJECTION_BATCH_SIZE":   &raw.Memory.ProjectionBatchSize,
-		"MEMORY_PROJECTION_MAX_ATTEMPTS": &raw.Memory.ProjectionMaxAttempts,
+		"AGENT_MAX_ITERATIONS":            &raw.Agent.MaxIterations,
+		"AGENT_MAX_MODEL_CALLS":           &raw.Agent.MaxModelCalls,
+		"AGENT_MAX_TOOL_CALLS":            &raw.Agent.MaxToolCalls,
+		"AGENT_MAX_REPAIR_ATTEMPTS":       &raw.Agent.MaxRepairAttempts,
+		"AGENT_MAX_OUTPUT_TOKENS":         &raw.Agent.MaxOutputTokens,
+		"INTENT_COMPLEX_THRESHOLD":        &raw.Agent.IntentComplexThreshold,
+		"MODEL_MAX_ATTEMPTS":              &raw.Resilience.ModelMaxAttempts,
+		"RAG_MAX_ATTEMPTS":                &raw.Resilience.RAGMaxAttempts,
+		"MODEL_MAX_CONCURRENCY":           &raw.Resilience.ModelMaxConcurrency,
+		"RAG_MAX_CONCURRENCY":             &raw.Resilience.RAGMaxConcurrency,
+		"CIRCUIT_FAILURE_THRESHOLD":       &raw.Resilience.CircuitFailureThreshold,
+		"GROUNDING_MIN_RESULTS":           &raw.Grounding.MinResults,
+		"GROUNDING_MAX_CONTEXT_CHARS":     &raw.Grounding.MaxContextChars,
+		"DATABASE_MAX_OPEN_CONNS":         &raw.Database.MaxOpenConns,
+		"DATABASE_MAX_IDLE_CONNS":         &raw.Database.MaxIdleConns,
+		"CONTEXT_MAX_INPUT_TOKENS":        &raw.Context.MaxInputTokens,
+		"CONTEXT_MIN_RECENT_MESSAGES":     &raw.Context.MinRecentMessages,
+		"CONTEXT_MESSAGE_HISTORY_LIMIT":   &raw.Context.MessageHistoryLimit,
+		"MEMORY_RECALL_TARGET":            &raw.Memory.RecallTarget,
+		"MEMORY_RECALL_PAGE_SIZE":         &raw.Memory.RecallPageSize,
+		"MEMORY_MAX_SCANNED":              &raw.Memory.MaxScanned,
+		"MEMORY_MAX_BATCHES":              &raw.Memory.MaxBatches,
+		"MEMORY_MAX_CONTEXT_CHARS":        &raw.Memory.MaxContextChars,
+		"MEMORY_PROJECTION_BATCH_SIZE":    &raw.Memory.ProjectionBatchSize,
+		"MEMORY_PROJECTION_MAX_ATTEMPTS":  &raw.Memory.ProjectionMaxAttempts,
+		"MEMORY_MAX_RECALL_SELECTORS":     &raw.Memory.MaxRecallSelectors,
+		"MEMORY_MAX_EXACT_CANDIDATES":     &raw.Memory.MaxExactCandidates,
+		"MEMORY_MAX_CANDIDATE_TEXT_CHARS": &raw.Memory.MaxCandidateTextChars,
+		"MEMORY_MAX_LLM_RESPONSE_BYTES":   &raw.Memory.MaxLLMResponseBytes,
+		"MEMORY_MAX_LLM_REPAIR_ATTEMPTS":  &raw.Memory.MaxLLMRepairAttempts,
 	} {
 		if err := applyIntEnvironment(key, target); err != nil {
 			return err
 		}
 	}
 	for key, target := range map[string]*float64{
-		"GROUNDING_MIN_TOP_SCORE":     &raw.Grounding.MinTopScore,
-		"GROUNDING_MIN_ITEM_SCORE":    &raw.Grounding.MinItemScore,
-		"INTENT_MIN_WRITE_CONFIDENCE": &raw.Agent.IntentMinWriteConfidence,
-		"MEMORY_CONFLICT_THRESHOLD":   &raw.Memory.ConflictThreshold,
+		"GROUNDING_MIN_TOP_SCORE":               &raw.Grounding.MinTopScore,
+		"GROUNDING_MIN_ITEM_SCORE":              &raw.Grounding.MinItemScore,
+		"INTENT_MIN_WRITE_CONFIDENCE":           &raw.Agent.IntentMinWriteConfidence,
+		"MEMORY_CONFLICT_THRESHOLD":             &raw.Memory.ConflictThreshold,
+		"MEMORY_STRUCTURED_PLAN_MIN_CONFIDENCE": &raw.Memory.StructuredPlanMinConfidence,
 	} {
 		if err := applyFloatEnvironment(key, target); err != nil {
 			return err
