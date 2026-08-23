@@ -31,6 +31,7 @@ type Config struct {
 	Context         ContextConfig
 	Auth            AuthConfig
 	Note            NoteConfig
+	Memory          MemoryConfig
 }
 
 type ModelConfig struct {
@@ -118,6 +119,29 @@ type NoteConfig struct {
 	KBID    uint64
 }
 
+type MemoryConfig struct {
+	Enabled               bool
+	RAGEnabled            bool
+	ProjectionEnabled     bool
+	WorkflowPilotEnabled  bool
+	DefaultSessionTTL     time.Duration
+	RecallTarget          int
+	RecallPageSize        int
+	MaxScanned            int
+	MaxBatches            int
+	MaxContextChars       int
+	ConflictThreshold     float64
+	ProjectionBatchSize   int
+	ProjectionBaseBackoff time.Duration
+	ProjectionMaxBackoff  time.Duration
+	ProjectionMaxAttempts int
+	RAGEndpoint           string
+	RAGTimeout            time.Duration
+	RAGServiceToken       string
+	OwnerClaimSecret      string
+	ProjectionVersion     string
+}
+
 type LoadOptions struct {
 	Path  string
 	Model string
@@ -136,6 +160,7 @@ type fileConfig struct {
 	Context         fileContextConfig          `yaml:"CONTEXT"`
 	Auth            fileAuthConfig             `yaml:"AUTH"`
 	Note            fileNoteConfig             `yaml:"NOTE"`
+	Memory          fileMemoryConfig           `yaml:"MEMORY"`
 
 	// 保留原有单模型配置格式的兼容性。
 	ModelProvider string `yaml:"MODEL_PROVIDER"`
@@ -210,6 +235,29 @@ type fileAuthConfig struct {
 type fileNoteConfig struct {
 	Enabled bool   `yaml:"ENABLED"`
 	KBID    uint64 `yaml:"KB_ID"`
+}
+
+type fileMemoryConfig struct {
+	Enabled               bool    `yaml:"ENABLED"`
+	RAGEnabled            bool    `yaml:"RAG_ENABLED"`
+	ProjectionEnabled     bool    `yaml:"PROJECTION_ENABLED"`
+	WorkflowPilotEnabled  bool    `yaml:"WORKFLOW_PILOT_ENABLED"`
+	DefaultSessionTTL     string  `yaml:"DEFAULT_SESSION_TTL"`
+	RecallTarget          int     `yaml:"RECALL_TARGET"`
+	RecallPageSize        int     `yaml:"RECALL_PAGE_SIZE"`
+	MaxScanned            int     `yaml:"MAX_SCANNED"`
+	MaxBatches            int     `yaml:"MAX_BATCHES"`
+	MaxContextChars       int     `yaml:"MAX_CONTEXT_CHARS"`
+	ConflictThreshold     float64 `yaml:"CONFLICT_THRESHOLD"`
+	ProjectionBatchSize   int     `yaml:"PROJECTION_BATCH_SIZE"`
+	ProjectionBaseBackoff string  `yaml:"PROJECTION_BASE_BACKOFF"`
+	ProjectionMaxBackoff  string  `yaml:"PROJECTION_MAX_BACKOFF"`
+	ProjectionMaxAttempts int     `yaml:"PROJECTION_MAX_ATTEMPTS"`
+	RAGEndpoint           string  `yaml:"RAG_ENDPOINT"`
+	RAGTimeout            string  `yaml:"RAG_TIMEOUT"`
+	RAGServiceToken       string  `yaml:"RAG_SERVICE_TOKEN"`
+	OwnerClaimSecret      string  `yaml:"OWNER_CLAIM_SECRET"`
+	ProjectionVersion     string  `yaml:"PROJECTION_VERSION"`
 }
 
 type fileRAGConfig struct {
@@ -301,6 +349,22 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	memorySessionTTL, err := parseDuration("MEMORY_DEFAULT_SESSION_TTL", raw.Memory.DefaultSessionTTL)
+	if err != nil {
+		return Config{}, err
+	}
+	memoryRAGTimeout, err := parseDuration("MEMORY_RAG_TIMEOUT", raw.Memory.RAGTimeout)
+	if err != nil {
+		return Config{}, err
+	}
+	projectionBaseBackoff, err := parseDuration("MEMORY_PROJECTION_BASE_BACKOFF", raw.Memory.ProjectionBaseBackoff)
+	if err != nil {
+		return Config{}, err
+	}
+	projectionMaxBackoff, err := parseDuration("MEMORY_PROJECTION_MAX_BACKOFF", raw.Memory.ProjectionMaxBackoff)
+	if err != nil {
+		return Config{}, err
+	}
 
 	cfg := Config{
 		HTTPAddr:        strings.TrimSpace(raw.HTTPAddr),
@@ -359,7 +423,8 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 			Enabled: raw.Auth.Enabled, SessionSecret: strings.TrimSpace(raw.Auth.SessionSecret), SessionTTL: sessionTTL,
 			CookieName: strings.TrimSpace(raw.Auth.CookieName), CookieSecure: raw.Auth.CookieSecure,
 		},
-		Note: NoteConfig{Enabled: raw.Note.Enabled, KBID: raw.Note.KBID},
+		Note:   NoteConfig{Enabled: raw.Note.Enabled, KBID: raw.Note.KBID},
+		Memory: MemoryConfig{Enabled: raw.Memory.Enabled, RAGEnabled: raw.Memory.RAGEnabled, ProjectionEnabled: raw.Memory.ProjectionEnabled, WorkflowPilotEnabled: raw.Memory.WorkflowPilotEnabled, DefaultSessionTTL: memorySessionTTL, RecallTarget: raw.Memory.RecallTarget, RecallPageSize: raw.Memory.RecallPageSize, MaxScanned: raw.Memory.MaxScanned, MaxBatches: raw.Memory.MaxBatches, MaxContextChars: raw.Memory.MaxContextChars, ConflictThreshold: raw.Memory.ConflictThreshold, ProjectionBatchSize: raw.Memory.ProjectionBatchSize, ProjectionBaseBackoff: projectionBaseBackoff, ProjectionMaxBackoff: projectionMaxBackoff, ProjectionMaxAttempts: raw.Memory.ProjectionMaxAttempts, RAGEndpoint: strings.TrimRight(strings.TrimSpace(raw.Memory.RAGEndpoint), "/"), RAGTimeout: memoryRAGTimeout, RAGServiceToken: strings.TrimSpace(raw.Memory.RAGServiceToken), OwnerClaimSecret: strings.TrimSpace(raw.Memory.OwnerClaimSecret), ProjectionVersion: strings.TrimSpace(raw.Memory.ProjectionVersion)},
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -413,6 +478,37 @@ func (c Config) Validate() error {
 	}
 	if err := c.Note.Validate(c.Auth.Enabled, c.Database.Enabled, c.RAG.Enabled); err != nil {
 		return err
+	}
+	if err := c.Memory.Validate(c.Database.Enabled); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c MemoryConfig) Validate(databaseEnabled bool) error {
+	if c.DefaultSessionTTL <= 0 || c.RecallTarget < 1 || c.RecallTarget > c.RecallPageSize || c.RecallPageSize < 1 || c.RecallPageSize > 200 || c.MaxScanned < c.RecallPageSize || c.MaxBatches < 1 || c.MaxContextChars < 1 || c.ConflictThreshold < 0 || c.ConflictThreshold > 1 || c.ProjectionBatchSize < 1 || c.ProjectionBatchSize > 200 || c.ProjectionBaseBackoff <= 0 || c.ProjectionMaxBackoff < c.ProjectionBaseBackoff || c.ProjectionMaxAttempts < 1 || c.RAGTimeout <= 0 || c.ProjectionVersion == "" {
+		return errors.New("MEMORY limits, durations, thresholds or projection version are invalid")
+	}
+	if !c.Enabled {
+		if c.RAGEnabled || c.ProjectionEnabled || c.WorkflowPilotEnabled {
+			return errors.New("MEMORY subfeatures require MEMORY_ENABLED")
+		}
+		return nil
+	}
+	if !databaseEnabled {
+		return errors.New("MEMORY requires DATABASE to be enabled")
+	}
+	if c.ProjectionEnabled && !c.RAGEnabled {
+		return errors.New("MEMORY_PROJECTION_ENABLED requires MEMORY_RAG_ENABLED")
+	}
+	if c.RAGEnabled {
+		if c.RAGEndpoint == "" || c.RAGServiceToken == "" || len(c.OwnerClaimSecret) < 32 {
+			return errors.New("MEMORY RAG requires endpoint, service token and OWNER_CLAIM_SECRET of at least 32 characters")
+		}
+		parsed, err := url.ParseRequestURI(c.RAGEndpoint)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			return errors.New("MEMORY_RAG_ENDPOINT must be an absolute HTTP(S) URL")
+		}
 	}
 	return nil
 }
@@ -564,7 +660,8 @@ func defaultFileConfig() fileConfig {
 		Context: fileContextConfig{
 			MaxInputTokens: 24000, MinRecentMessages: 6, MessageHistoryLimit: 100,
 		},
-		Auth: fileAuthConfig{SessionTTL: "168h", CookieName: "note_agent_session"},
+		Auth:   fileAuthConfig{SessionTTL: "168h", CookieName: "note_agent_session"},
+		Memory: fileMemoryConfig{DefaultSessionTTL: "24h", RecallTarget: 10, RecallPageSize: 20, MaxScanned: 200, MaxBatches: 10, MaxContextChars: 12000, ConflictThreshold: .8, ProjectionBatchSize: 50, ProjectionBaseBackoff: "1s", ProjectionMaxBackoff: "5m", ProjectionMaxAttempts: 8, RAGTimeout: "10s", ProjectionVersion: "v1"},
 	}
 }
 
@@ -634,21 +731,29 @@ func applyServiceEnvironment(raw *fileConfig) error {
 		"SHUTDOWN_TIMEOUT": &raw.ShutdownTimeout,
 	})
 	applyEnvironment(map[string]*string{
-		"RAG_BASE_URL":               &raw.RAG.BaseURL,
-		"RAG_API_KEY":                &raw.RAG.APIKey,
-		"RAG_TIMEOUT":                &raw.RAG.Timeout,
-		"RAG_STRATEGY_PROFILE":       &raw.RAG.StrategyProfile,
-		"AGENT_RUN_TIMEOUT":          &raw.Agent.RunTimeout,
-		"AGENT_TOOL_TIMEOUT":         &raw.Agent.ToolTimeout,
-		"NOTE_DRAFT_TTL":             &raw.Agent.NoteDraftTTL,
-		"RETRY_BASE_DELAY":           &raw.Resilience.RetryBaseDelay,
-		"RETRY_MAX_DELAY":            &raw.Resilience.RetryMaxDelay,
-		"CIRCUIT_OPEN_TIMEOUT":       &raw.Resilience.CircuitOpenTimeout,
-		"DATABASE_DSN":               &raw.Database.DSN,
-		"DATABASE_CONN_MAX_LIFETIME": &raw.Database.ConnMaxLifetime,
-		"AUTH_SESSION_SECRET":        &raw.Auth.SessionSecret,
-		"AUTH_SESSION_TTL":           &raw.Auth.SessionTTL,
-		"AUTH_COOKIE_NAME":           &raw.Auth.CookieName,
+		"RAG_BASE_URL":                   &raw.RAG.BaseURL,
+		"RAG_API_KEY":                    &raw.RAG.APIKey,
+		"RAG_TIMEOUT":                    &raw.RAG.Timeout,
+		"RAG_STRATEGY_PROFILE":           &raw.RAG.StrategyProfile,
+		"AGENT_RUN_TIMEOUT":              &raw.Agent.RunTimeout,
+		"AGENT_TOOL_TIMEOUT":             &raw.Agent.ToolTimeout,
+		"NOTE_DRAFT_TTL":                 &raw.Agent.NoteDraftTTL,
+		"RETRY_BASE_DELAY":               &raw.Resilience.RetryBaseDelay,
+		"RETRY_MAX_DELAY":                &raw.Resilience.RetryMaxDelay,
+		"CIRCUIT_OPEN_TIMEOUT":           &raw.Resilience.CircuitOpenTimeout,
+		"DATABASE_DSN":                   &raw.Database.DSN,
+		"DATABASE_CONN_MAX_LIFETIME":     &raw.Database.ConnMaxLifetime,
+		"AUTH_SESSION_SECRET":            &raw.Auth.SessionSecret,
+		"AUTH_SESSION_TTL":               &raw.Auth.SessionTTL,
+		"AUTH_COOKIE_NAME":               &raw.Auth.CookieName,
+		"MEMORY_DEFAULT_SESSION_TTL":     &raw.Memory.DefaultSessionTTL,
+		"MEMORY_PROJECTION_BASE_BACKOFF": &raw.Memory.ProjectionBaseBackoff,
+		"MEMORY_PROJECTION_MAX_BACKOFF":  &raw.Memory.ProjectionMaxBackoff,
+		"MEMORY_RAG_ENDPOINT":            &raw.Memory.RAGEndpoint,
+		"MEMORY_RAG_TIMEOUT":             &raw.Memory.RAGTimeout,
+		"MEMORY_RAG_SERVICE_TOKEN":       &raw.Memory.RAGServiceToken,
+		"MEMORY_OWNER_CLAIM_SECRET":      &raw.Memory.OwnerClaimSecret,
+		"MEMORY_PROJECTION_VERSION":      &raw.Memory.ProjectionVersion,
 	})
 	for key, target := range map[string]*bool{
 		"DATABASE_ENABLED":               &raw.Database.Enabled,
@@ -659,6 +764,10 @@ func applyServiceEnvironment(raw *fileConfig) error {
 		"ENABLE_MULTI_AGENT":             &raw.Agent.EnableMultiAgent,
 		"ENABLE_INTENT_ROUTING":          &raw.Agent.EnableIntentRouting,
 		"ENABLE_LEGACY_ROUTING_FALLBACK": &raw.Agent.EnableLegacyRoutingFallback,
+		"MEMORY_ENABLED":                 &raw.Memory.Enabled,
+		"MEMORY_RAG_ENABLED":             &raw.Memory.RAGEnabled,
+		"MEMORY_PROJECTION_ENABLED":      &raw.Memory.ProjectionEnabled,
+		"MEMORY_WORKFLOW_PILOT_ENABLED":  &raw.Memory.WorkflowPilotEnabled,
 	} {
 		if err := applyBoolEnvironment(key, target); err != nil {
 			return err
@@ -693,24 +802,31 @@ func applyServiceEnvironment(raw *fileConfig) error {
 		raw.RAG.KBIDs = ids
 	}
 	for key, target := range map[string]*int{
-		"AGENT_MAX_ITERATIONS":          &raw.Agent.MaxIterations,
-		"AGENT_MAX_MODEL_CALLS":         &raw.Agent.MaxModelCalls,
-		"AGENT_MAX_TOOL_CALLS":          &raw.Agent.MaxToolCalls,
-		"AGENT_MAX_REPAIR_ATTEMPTS":     &raw.Agent.MaxRepairAttempts,
-		"AGENT_MAX_OUTPUT_TOKENS":       &raw.Agent.MaxOutputTokens,
-		"INTENT_COMPLEX_THRESHOLD":      &raw.Agent.IntentComplexThreshold,
-		"MODEL_MAX_ATTEMPTS":            &raw.Resilience.ModelMaxAttempts,
-		"RAG_MAX_ATTEMPTS":              &raw.Resilience.RAGMaxAttempts,
-		"MODEL_MAX_CONCURRENCY":         &raw.Resilience.ModelMaxConcurrency,
-		"RAG_MAX_CONCURRENCY":           &raw.Resilience.RAGMaxConcurrency,
-		"CIRCUIT_FAILURE_THRESHOLD":     &raw.Resilience.CircuitFailureThreshold,
-		"GROUNDING_MIN_RESULTS":         &raw.Grounding.MinResults,
-		"GROUNDING_MAX_CONTEXT_CHARS":   &raw.Grounding.MaxContextChars,
-		"DATABASE_MAX_OPEN_CONNS":       &raw.Database.MaxOpenConns,
-		"DATABASE_MAX_IDLE_CONNS":       &raw.Database.MaxIdleConns,
-		"CONTEXT_MAX_INPUT_TOKENS":      &raw.Context.MaxInputTokens,
-		"CONTEXT_MIN_RECENT_MESSAGES":   &raw.Context.MinRecentMessages,
-		"CONTEXT_MESSAGE_HISTORY_LIMIT": &raw.Context.MessageHistoryLimit,
+		"AGENT_MAX_ITERATIONS":           &raw.Agent.MaxIterations,
+		"AGENT_MAX_MODEL_CALLS":          &raw.Agent.MaxModelCalls,
+		"AGENT_MAX_TOOL_CALLS":           &raw.Agent.MaxToolCalls,
+		"AGENT_MAX_REPAIR_ATTEMPTS":      &raw.Agent.MaxRepairAttempts,
+		"AGENT_MAX_OUTPUT_TOKENS":        &raw.Agent.MaxOutputTokens,
+		"INTENT_COMPLEX_THRESHOLD":       &raw.Agent.IntentComplexThreshold,
+		"MODEL_MAX_ATTEMPTS":             &raw.Resilience.ModelMaxAttempts,
+		"RAG_MAX_ATTEMPTS":               &raw.Resilience.RAGMaxAttempts,
+		"MODEL_MAX_CONCURRENCY":          &raw.Resilience.ModelMaxConcurrency,
+		"RAG_MAX_CONCURRENCY":            &raw.Resilience.RAGMaxConcurrency,
+		"CIRCUIT_FAILURE_THRESHOLD":      &raw.Resilience.CircuitFailureThreshold,
+		"GROUNDING_MIN_RESULTS":          &raw.Grounding.MinResults,
+		"GROUNDING_MAX_CONTEXT_CHARS":    &raw.Grounding.MaxContextChars,
+		"DATABASE_MAX_OPEN_CONNS":        &raw.Database.MaxOpenConns,
+		"DATABASE_MAX_IDLE_CONNS":        &raw.Database.MaxIdleConns,
+		"CONTEXT_MAX_INPUT_TOKENS":       &raw.Context.MaxInputTokens,
+		"CONTEXT_MIN_RECENT_MESSAGES":    &raw.Context.MinRecentMessages,
+		"CONTEXT_MESSAGE_HISTORY_LIMIT":  &raw.Context.MessageHistoryLimit,
+		"MEMORY_RECALL_TARGET":           &raw.Memory.RecallTarget,
+		"MEMORY_RECALL_PAGE_SIZE":        &raw.Memory.RecallPageSize,
+		"MEMORY_MAX_SCANNED":             &raw.Memory.MaxScanned,
+		"MEMORY_MAX_BATCHES":             &raw.Memory.MaxBatches,
+		"MEMORY_MAX_CONTEXT_CHARS":       &raw.Memory.MaxContextChars,
+		"MEMORY_PROJECTION_BATCH_SIZE":   &raw.Memory.ProjectionBatchSize,
+		"MEMORY_PROJECTION_MAX_ATTEMPTS": &raw.Memory.ProjectionMaxAttempts,
 	} {
 		if err := applyIntEnvironment(key, target); err != nil {
 			return err
@@ -720,6 +836,7 @@ func applyServiceEnvironment(raw *fileConfig) error {
 		"GROUNDING_MIN_TOP_SCORE":     &raw.Grounding.MinTopScore,
 		"GROUNDING_MIN_ITEM_SCORE":    &raw.Grounding.MinItemScore,
 		"INTENT_MIN_WRITE_CONFIDENCE": &raw.Agent.IntentMinWriteConfidence,
+		"MEMORY_CONFLICT_THRESHOLD":   &raw.Memory.ConflictThreshold,
 	} {
 		if err := applyFloatEnvironment(key, target); err != nil {
 			return err

@@ -9,6 +9,19 @@ import (
 	"time"
 )
 
+type resolvedActorContextKey struct{}
+
+// WithResolvedActor exposes an already authenticated resume actor to workflow nodes.
+// DurableRuntime sets it only after the wait claim has validated the actor and command.
+func WithResolvedActor(ctx context.Context, actor ActorRef) context.Context {
+	return context.WithValue(ctx, resolvedActorContextKey{}, actor)
+}
+
+func ResolvedActorFromContext(ctx context.Context) (ActorRef, bool) {
+	actor, ok := ctx.Value(resolvedActorContextKey{}).(ActorRef)
+	return actor, ok && actor.Validate() == nil
+}
+
 const (
 	MinLeaseDuration      = time.Second
 	MaxLeaseDuration      = 24 * time.Hour

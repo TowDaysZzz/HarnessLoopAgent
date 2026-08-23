@@ -2,6 +2,55 @@ package ragclient
 
 import "time"
 
+type MemoryLayer string
+type MemoryKind string
+
+type MemoryIndexRequest struct {
+	MemoryID          string      `json:"memory_id"`
+	CanonicalText     string      `json:"canonical_text"`
+	ContentHash       string      `json:"content_hash"`
+	Layer             MemoryLayer `json:"layer"`
+	Kind              MemoryKind  `json:"kind"`
+	CreatedAt         time.Time   `json:"created_at"`
+	ProjectionVersion string      `json:"projection_version"`
+}
+
+type MemoryIndexResponse struct {
+	MemoryID string `json:"memory_id"`
+	Indexed  bool   `json:"indexed"`
+	Reused   bool   `json:"reused"`
+}
+
+type MemorySearchRequest struct {
+	Query  string        `json:"query"`
+	Layers []MemoryLayer `json:"layers,omitempty"`
+	Kinds  []MemoryKind  `json:"kinds,omitempty"`
+	Limit  int           `json:"limit"`
+	Cursor string        `json:"cursor,omitempty"`
+}
+
+type MemorySearchCandidate struct {
+	MemoryID string  `json:"memory_id"`
+	Score    float64 `json:"score"`
+}
+
+type MemorySearchResponse struct {
+	RequestID  string                  `json:"request_id"`
+	Candidates []MemorySearchCandidate `json:"candidates"`
+	NextCursor string                  `json:"next_cursor,omitempty"`
+}
+
+type MemoryGenerationRequest struct {
+	Generation        string `json:"generation"`
+	EmbeddingModel    string `json:"embedding_model"`
+	ProjectionVersion string `json:"projection_version"`
+}
+
+type MemoryGenerationResponse struct {
+	Generation string `json:"generation"`
+	Status     string `json:"status"`
+}
+
 type KnowledgeBase struct {
 	ID          uint64    `json:"id"`
 	TenantID    uint64    `json:"tenant_id"`

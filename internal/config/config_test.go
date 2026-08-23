@@ -291,6 +291,98 @@ func TestIntentRoutingConfigDefaults(t *testing.T) {
 	}
 }
 
+func TestMemoryConfigDefaultsAreSafeAndDisabled(t *testing.T) {
+	clearOverrides(t)
+	cfg, err := LoadWithOptions(LoadOptions{Path: writeConfig(t, "MODEL_NAME: test\nMODEL_API_KEY: key\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Memory.Enabled || cfg.Memory.RAGEnabled || cfg.Memory.ProjectionEnabled || cfg.Memory.WorkflowPilotEnabled {
+		t.Fatalf("memory switches must default off: %+v", cfg.Memory)
+	}
+	if cfg.Memory.RecallPageSize != 20 || cfg.Memory.MaxScanned != 200 || cfg.Memory.DefaultSessionTTL != 24*time.Hour || cfg.Memory.ProjectionMaxBackoff != 5*time.Minute {
+		t.Fatalf("memory defaults=%+v", cfg.Memory)
+	}
+}
+
+func TestLoadMemoryConfigAndEnvironment(t *testing.T) {
+	clearOverrides(t)
+	path := writeConfig(t, `MODEL_NAME: test
+MODEL_API_KEY: key
+DATABASE:
+  ENABLED: true
+  DSN: user:pass@tcp(localhost:3306)/test
+MEMORY:
+  ENABLED: true
+  RAG_ENABLED: true
+  PROJECTION_ENABLED: true
+  WORKFLOW_PILOT_ENABLED: true
+  DEFAULT_SESSION_TTL: 12h
+  RECALL_TARGET: 5
+  RECALL_PAGE_SIZE: 20
+  MAX_SCANNED: 100
+  MAX_BATCHES: 5
+  MAX_CONTEXT_CHARS: 8000
+  CONFLICT_THRESHOLD: 0.9
+  PROJECTION_BATCH_SIZE: 25
+  PROJECTION_BASE_BACKOFF: 2s
+  PROJECTION_MAX_BACKOFF: 1m
+  PROJECTION_MAX_ATTEMPTS: 4
+  RAG_ENDPOINT: http://memory-rag.test
+  RAG_TIMEOUT: 5s
+  RAG_SERVICE_TOKEN: service-token
+  OWNER_CLAIM_SECRET: 12345678901234567890123456789012
+  PROJECTION_VERSION: v2
+`)
+	t.Setenv("MEMORY_RECALL_TARGET", "6")
+	t.Setenv("MEMORY_WORKFLOW_PILOT_ENABLED", "false")
+	cfg, err := LoadWithOptions(LoadOptions{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Memory.Enabled || !cfg.Memory.RAGEnabled || !cfg.Memory.ProjectionEnabled || cfg.Memory.WorkflowPilotEnabled || cfg.Memory.RecallTarget != 6 || cfg.Memory.RAGTimeout != 5*time.Second || cfg.Memory.ProjectionVersion != "v2" {
+		t.Fatalf("memory config=%+v", cfg.Memory)
+	}
+}
+
+func TestMemoryConfigRejectsInvalidFeatureCombinations(t *testing.T) {
+	base := "MODEL_NAME: test\nMODEL_API_KEY: key\n"
+	tests := map[string]string{
+		"subfeature without memory": `MEMORY:
+  RAG_ENABLED: true
+`,
+		"memory without database": `MEMORY:
+  ENABLED: true
+`,
+		"projection without rag": `DATABASE:
+  ENABLED: true
+  DSN: mysql
+MEMORY:
+  ENABLED: true
+  PROJECTION_ENABLED: true
+`,
+		"rag missing credentials": `DATABASE:
+  ENABLED: true
+  DSN: mysql
+MEMORY:
+  ENABLED: true
+  RAG_ENABLED: true
+`,
+		"invalid scan": `MEMORY:
+  MAX_SCANNED: 1
+`,
+	}
+	for name, fragment := range tests {
+		t.Run(name, func(t *testing.T) {
+			clearOverrides(t)
+			_, err := LoadWithOptions(LoadOptions{Path: writeConfig(t, base+fragment)})
+			if err == nil {
+				t.Fatal("expected invalid memory config")
+			}
+		})
+	}
+}
+
 func TestLoadRejectsInvalidIntentRoutingConfig(t *testing.T) {
 	for name, yaml := range map[string]string{
 		"threshold":  "INTENT_COMPLEX_THRESHOLD: 0",

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/protocol"
+	"github.com/google/uuid"
 )
 
 type doerFunc func(context.Context, *protocol.Request, *protocol.Response) error
@@ -185,11 +186,122 @@ func TestAuthAPIsDoNotSendStaticAPIKey(t *testing.T) {
 	}
 }
 
+func TestMemoryIndexUsesTrustedOwnerAndStableID(t *testing.T) {
+	id := uuid.NewString()
+	client := newMemoryTestClient(t, doerFunc(func(_ context.Context, request *protocol.Request, response *protocol.Response) error {
+		body := string(request.Body())
+		if strings.Contains(body, "tenant_id") || strings.Contains(body, "user_id") || strings.Contains(body, "collection") {
+			t.Fatalf("untrusted scope leaked into body: %s", body)
+		}
+		if request.Header.Get("Authorization") != "Bearer rag_test" || request.Header.Get("X-Memory-Tenant-ID") != "7" || request.Header.Get("X-Memory-User-ID") != "9" || request.Header.Get("X-Memory-Owner-Claim") == "" {
+			t.Fatalf("memory auth headers missing: authorization=%q tenant=%q user=%q claim_present=%v", request.Header.Get("Authorization"), request.Header.Get("X-Memory-Tenant-ID"), request.Header.Get("X-Memory-User-ID"), request.Header.Get("X-Memory-Owner-Claim") != "")
+		}
+		if request.Header.Get("Idempotency-Key") != id+":"+strings.Repeat("a", 64)+":v1" {
+			t.Fatalf("idempotency=%q", request.Header.Get("Idempotency-Key"))
+		}
+		response.SetStatusCode(200)
+		response.SetBodyString(`{"code":200,"message":"Success","data":{"memory_id":"` + id + `","indexed":true}}`)
+		return nil
+	}))
+	request := MemoryIndexRequest{MemoryID: id, CanonicalText: "user likes tea", ContentHash: strings.Repeat("a", 64), Layer: "long_term", Kind: "preference", CreatedAt: time.Now().UTC(), ProjectionVersion: "v1"}
+	if _, err := client.IndexMemory(context.Background(), request); err == nil || !strings.Contains(err.Error(), "trusted memory owner") {
+		t.Fatalf("missing owner error=%v", err)
+	}
+	result, err := client.IndexMemory(WithTrustedMemoryOwner(context.Background(), 7, 9), request)
+	if err != nil || !result.Indexed {
+		t.Fatalf("IndexMemory=%+v err=%v", result, err)
+	}
+}
+
+func TestMemorySearchValidatesUntrustedResponse(t *testing.T) {
+	validID := uuid.NewString()
+	ctx := WithTrustedMemoryOwner(context.Background(), 7, 9)
+	tests := []struct{ name, body string }{
+		{"unknown id", `{"code":200,"message":"Success","data":{"candidates":[{"memory_id":"bad","score":0.5}]}}`},
+		{"score", `{"code":200,"message":"Success","data":{"candidates":[{"memory_id":"` + validID + `","score":1.1}]}}`},
+		{"cursor", `{"code":200,"message":"Success","data":{"candidates":[],"next_cursor":"` + strings.Repeat("x", 513) + `"}}`},
+		{"duplicate", `{"code":200,"message":"Success","data":{"candidates":[{"memory_id":"` + validID + `","score":0.8},{"memory_id":"` + validID + `","score":0.7}]}}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newMemoryTestClient(t, staticResponse(200, tt.body))
+			if _, err := client.SearchMemory(ctx, MemorySearchRequest{Query: "tea", Limit: 20}); err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
+	}
+	client := newMemoryTestClient(t, staticResponse(200, `{"code":200,"message":"Success","data":{"request_id":"r1","candidates":[{"memory_id":"`+validID+`","score":0.8}],"next_cursor":"page2"}}`))
+	result, err := client.SearchMemory(ctx, MemorySearchRequest{Query: "tea", Layers: []MemoryLayer{"long_term"}, Limit: 20})
+	if err != nil || len(result.Candidates) != 1 || result.NextCursor != "page2" {
+		t.Fatalf("SearchMemory=%+v err=%v", result, err)
+	}
+}
+
+func TestMemorySearchClassifiesTemporaryErrorsAndBounds(t *testing.T) {
+	ctx := WithTrustedMemoryOwner(context.Background(), 1, 2)
+	for _, status := range []int{400, 429, 503} {
+		client := newMemoryTestClient(t, staticResponse(status, `{"code":`+strconv.Itoa(status)+`,"message":"failed","data":null}`))
+		_, err := client.SearchMemory(ctx, MemorySearchRequest{Query: "x", Limit: 20})
+		var apiErr *APIError
+		if !errors.As(err, &apiErr) || apiErr.Temporary() != (status == 429 || status >= 500) {
+			t.Fatalf("status=%d err=%v", status, err)
+		}
+	}
+	client := newMemoryTestClient(t, staticResponse(200, `{"code":200,"message":"Success","data":{"candidates":[]}}`))
+	if _, err := client.SearchMemory(ctx, MemorySearchRequest{Query: "x", Limit: 201}); err == nil {
+		t.Fatal("expected limit error")
+	}
+}
+
+func TestMemoryGenerationLifecycle(t *testing.T) {
+	ctx := WithTrustedMemoryOwner(context.Background(), 1, 2)
+	calls := 0
+	client := newMemoryTestClient(t, doerFunc(func(_ context.Context, request *protocol.Request, response *protocol.Response) error {
+		calls++
+		path := string(request.URI().Path())
+		switch calls {
+		case 1:
+			if path != "/v1/memories/generations" {
+				t.Fatalf("path=%s", path)
+			}
+		case 2:
+			if path != "/v1/memories/generations/gen-v2/validate" {
+				t.Fatalf("path=%s", path)
+			}
+		case 3:
+			if path != "/v1/memories/generations/gen-v2/switch" {
+				t.Fatalf("path=%s", path)
+			}
+		}
+		response.SetStatusCode(200)
+		response.SetBodyString(`{"code":200,"message":"Success","data":{"generation":"gen-v2","status":"ready"}}`)
+		return nil
+	}))
+	if _, err := client.StartMemoryGeneration(ctx, MemoryGenerationRequest{Generation: "gen-v2", EmbeddingModel: "embed-v2", ProjectionVersion: "v2"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.ValidateMemoryGeneration(ctx, "gen-v2"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.SwitchMemoryGeneration(ctx, "gen-v2"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func newTestClient(t *testing.T, doer doer) *Client {
 	t.Helper()
 	client, err := newClient(ClientConfig{BaseURL: "http://rag.test", APIKey: "rag_test", Timeout: time.Second}, doer)
 	if err != nil {
 		t.Fatalf("newClient() error = %v", err)
+	}
+	return client
+}
+
+func newMemoryTestClient(t *testing.T, doer doer) *Client {
+	t.Helper()
+	client, err := newClient(ClientConfig{BaseURL: "http://rag.test", APIKey: "rag_test", OwnerClaimSecret: "owner-secret", Timeout: time.Second}, doer)
+	if err != nil {
+		t.Fatal(err)
 	}
 	return client
 }

@@ -143,6 +143,9 @@ func (r *DurableRuntime[T]) Renew(ctx context.Context, owner WorkflowOwner, runI
 }
 
 func (r *DurableRuntime[T]) execute(ctx context.Context, owner WorkflowOwner, claimed StoredWorkflow, state WorkflowState[T], command *ResumeCommand, actor ActorRef) (RunResult[T], error) {
+	if command != nil {
+		ctx = WithResolvedActor(ctx, actor)
+	}
 	collector := NewMemoryCollector()
 	runner, err := NewRunner(r.nodes, RunnerOptions{Observer: collector, Now: r.now})
 	if err != nil {

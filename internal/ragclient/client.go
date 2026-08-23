@@ -2,16 +2,20 @@ package ragclient
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
 	appclient "github.com/cloudwego/hertz/pkg/app/client"
 	"github.com/cloudwego/hertz/pkg/protocol"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
+	"github.com/google/uuid"
 )
 
 const defaultMaxResponseBytes = 2 << 20
@@ -19,12 +23,21 @@ const defaultMaxResponseBytes = 2 << 20
 type ClientConfig struct {
 	BaseURL          string
 	APIKey           string
+	OwnerClaimSecret string
 	Timeout          time.Duration
 	MaxResponseBytes int
 }
 
 type Retriever interface {
 	Retrieve(ctx context.Context, request RetrieveRequest) (*RetrieveResponse, error)
+}
+
+type MemoryClient interface {
+	IndexMemory(context.Context, MemoryIndexRequest) (*MemoryIndexResponse, error)
+	SearchMemory(context.Context, MemorySearchRequest) (*MemorySearchResponse, error)
+	StartMemoryGeneration(context.Context, MemoryGenerationRequest) (*MemoryGenerationResponse, error)
+	ValidateMemoryGeneration(context.Context, string) (*MemoryGenerationResponse, error)
+	SwitchMemoryGeneration(context.Context, string) (*MemoryGenerationResponse, error)
 }
 
 type doer interface {
@@ -34,6 +47,7 @@ type doer interface {
 type Client struct {
 	baseURL          string
 	apiKey           string
+	ownerClaimSecret string
 	timeout          time.Duration
 	maxResponseBytes int
 	doer             doer
@@ -48,6 +62,18 @@ type TraceHeaders struct {
 type traceHeadersKey struct{}
 type accessTokenKey struct{}
 type knowledgeBaseIDsKey struct{}
+type memoryOwnerKey struct{}
+
+type TrustedMemoryOwner struct {
+	TenantID uint64
+	UserID   uint64
+}
+
+// WithTrustedMemoryOwner is only for authenticated service or durable workflow boundaries.
+// Memory request bodies intentionally contain no owner or collection fields.
+func WithTrustedMemoryOwner(ctx context.Context, tenantID, userID uint64) context.Context {
+	return context.WithValue(ctx, memoryOwnerKey{}, TrustedMemoryOwner{TenantID: tenantID, UserID: userID})
+}
 
 func WithTraceHeaders(ctx context.Context, headers TraceHeaders) context.Context {
 	return context.WithValue(ctx, traceHeadersKey{}, headers)
@@ -95,10 +121,119 @@ func newClient(config ClientConfig, doer doer) (*Client, error) {
 	return &Client{
 		baseURL:          baseURL,
 		apiKey:           strings.TrimSpace(config.APIKey),
+		ownerClaimSecret: strings.TrimSpace(config.OwnerClaimSecret),
 		timeout:          config.Timeout,
 		maxResponseBytes: maxBytes,
 		doer:             doer,
 	}, nil
+}
+
+func (c *Client) IndexMemory(ctx context.Context, request MemoryIndexRequest) (*MemoryIndexResponse, error) {
+	if _, err := uuid.Parse(request.MemoryID); err != nil || strings.TrimSpace(request.CanonicalText) == "" || len(request.CanonicalText) > 16*1024 || len(request.ContentHash) != 64 || request.Layer == "" || request.Kind == "" || request.CreatedAt.IsZero() || strings.TrimSpace(request.ProjectionVersion) == "" {
+		return nil, errors.New("invalid RAG memory index request")
+	}
+	var result MemoryIndexResponse
+	if err := c.doMemoryJSON(ctx, consts.MethodPost, "/v1/memories/index", request, &result, request.MemoryID+":"+request.ContentHash+":"+request.ProjectionVersion); err != nil {
+		return nil, fmt.Errorf("index RAG memory: %w", err)
+	}
+	if result.MemoryID != request.MemoryID {
+		return nil, errors.New("RAG memory index returned mismatched memory ID")
+	}
+	return &result, nil
+}
+
+func (c *Client) SearchMemory(ctx context.Context, request MemorySearchRequest) (*MemorySearchResponse, error) {
+	request.Query = strings.TrimSpace(request.Query)
+	if request.Query == "" || len(request.Query) > 16*1024 || request.Limit < 1 || request.Limit > 200 || len(request.Cursor) > 512 || len(request.Layers) > 8 || len(request.Kinds) > 32 {
+		return nil, errors.New("invalid RAG memory search request")
+	}
+	var result MemorySearchResponse
+	if err := c.doMemoryJSON(ctx, consts.MethodPost, "/v1/memories/search", request, &result, ""); err != nil {
+		return nil, fmt.Errorf("search RAG memory: %w", err)
+	}
+	if len(result.Candidates) > request.Limit || len(result.NextCursor) > 512 {
+		return nil, errors.New("invalid RAG memory search response bounds")
+	}
+	seen := map[string]struct{}{}
+	for _, candidate := range result.Candidates {
+		if _, err := uuid.Parse(candidate.MemoryID); err != nil || candidate.Score < 0 || candidate.Score > 1 {
+			return nil, errors.New("invalid RAG memory search candidate")
+		}
+		if _, ok := seen[candidate.MemoryID]; ok {
+			return nil, errors.New("duplicate RAG memory search candidate")
+		}
+		seen[candidate.MemoryID] = struct{}{}
+	}
+	if result.Candidates == nil {
+		result.Candidates = []MemorySearchCandidate{}
+	}
+	return &result, nil
+}
+
+func (c *Client) StartMemoryGeneration(ctx context.Context, request MemoryGenerationRequest) (*MemoryGenerationResponse, error) {
+	if !validGeneration(request.Generation) || strings.TrimSpace(request.EmbeddingModel) == "" || strings.TrimSpace(request.ProjectionVersion) == "" {
+		return nil, errors.New("invalid memory generation request")
+	}
+	var result MemoryGenerationResponse
+	if err := c.doMemoryJSON(ctx, consts.MethodPost, "/v1/memories/generations", request, &result, "generation:"+request.Generation); err != nil {
+		return nil, fmt.Errorf("start memory generation: %w", err)
+	}
+	return &result, nil
+}
+
+func (c *Client) ValidateMemoryGeneration(ctx context.Context, generation string) (*MemoryGenerationResponse, error) {
+	return c.memoryGenerationAction(ctx, generation, "validate")
+}
+func (c *Client) SwitchMemoryGeneration(ctx context.Context, generation string) (*MemoryGenerationResponse, error) {
+	return c.memoryGenerationAction(ctx, generation, "switch")
+}
+func (c *Client) memoryGenerationAction(ctx context.Context, generation, action string) (*MemoryGenerationResponse, error) {
+	if !validGeneration(generation) {
+		return nil, errors.New("invalid memory generation")
+	}
+	var result MemoryGenerationResponse
+	if err := c.doMemoryJSON(ctx, consts.MethodPost, "/v1/memories/generations/"+generation+"/"+action, nil, &result, action+":"+generation); err != nil {
+		return nil, fmt.Errorf("%s memory generation: %w", action, err)
+	}
+	return &result, nil
+}
+func validGeneration(value string) bool {
+	if len(value) < 1 || len(value) > 128 {
+		return false
+	}
+	for _, r := range value {
+		if !(r == '-' || r == '_' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9') {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *Client) doMemoryJSON(ctx context.Context, method, path string, body, result any, idempotencyKey string) error {
+	owner, ok := ctx.Value(memoryOwnerKey{}).(TrustedMemoryOwner)
+	if !ok || owner.TenantID == 0 || owner.UserID == 0 {
+		return errors.New("trusted memory owner is required")
+	}
+	if c.apiKey == "" || c.ownerClaimSecret == "" {
+		return errors.New("RAG memory service authorization is not configured")
+	}
+	issued := time.Now().UTC().Unix()
+	payload := fmt.Sprintf("%d:%d:%d:memory", owner.TenantID, owner.UserID, issued)
+	mac := hmac.New(sha256.New, []byte(c.ownerClaimSecret))
+	_, _ = mac.Write([]byte(payload))
+	claim := fmt.Sprintf("%s:%x", payload, mac.Sum(nil))
+	ctx = context.WithValue(ctx, memoryClaimHeadersKey{}, memoryClaimHeaders{TenantID: owner.TenantID, UserID: owner.UserID, Claim: claim})
+	keys := []string{}
+	if idempotencyKey != "" {
+		keys = []string{idempotencyKey}
+	}
+	return c.doJSON(ctx, method, path, body, "service", result, keys...)
+}
+
+type memoryClaimHeadersKey struct{}
+type memoryClaimHeaders struct {
+	TenantID, UserID uint64
+	Claim            string
 }
 
 func (c *Client) Retrieve(ctx context.Context, request RetrieveRequest) (*RetrieveResponse, error) {
@@ -308,4 +443,11 @@ func setTraceHeaders(ctx context.Context, request *protocol.Request) {
 			request.Header.Set(key, value)
 		}
 	}
+	if memoryHeaders, ok := ctx.Value(memoryClaimHeadersKey{}).(memoryClaimHeaders); ok {
+		request.Header.Set("X-Memory-Tenant-ID", strconv.FormatUint(memoryHeaders.TenantID, 10))
+		request.Header.Set("X-Memory-User-ID", strconv.FormatUint(memoryHeaders.UserID, 10))
+		request.Header.Set("X-Memory-Owner-Claim", memoryHeaders.Claim)
+	}
 }
+
+var _ MemoryClient = (*Client)(nil)
