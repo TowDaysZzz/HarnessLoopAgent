@@ -4,7 +4,7 @@
 
 ## 当前里程碑
 
-仓库已完成 Agent 初始化、RAG 接入、HarnessRuntime 稳定性/证据治理，会话、消息、Agent Run、持久化事件、可恢复 SSE，以及第一版 BFF 认证和笔记新增/查询/删除链路。长期记忆已具备默认关闭的 MySQL-only 显式 Capture/Review/精确召回试点；洞察工作流和更广泛的 Memory 消费仍在后续阶段。
+仓库已完成 Agent 初始化、RAG 接入、HarnessRuntime 稳定性/证据治理，会话、消息、Agent Run、持久化事件、可恢复 SSE，以及第一版 BFF 认证和笔记新增/查询/删除链路。长期记忆与一次性 Reminder 均提供默认关闭的 MySQL-only Workflow 试点；Reminder 可精确固定 Memory 版本，并通过 Dispatcher + Outbox 提供 at-least-once 投递边界。
 
 ## 环境要求
 
@@ -60,6 +60,8 @@ NOTE:
 个人知识库接口：`GET /v1/knowledge-base`、`POST /v1/knowledge-base`。首次使用时调用 `POST`；Agent 会优先绑定该用户在 RAG 中已有的个人知识库，没有时才创建一个。绑定以 `tenant_id + user_id` 唯一保存到 Agent MySQL，笔记写入和 Eino 检索均使用该绑定。重复调用不会为同一 Agent 用户重复创建知识库。
 
 笔记接口：`POST /v1/notes`、`GET /v1/notes`、`GET /v1/notes/{note_id}`、`GET /v1/notes/{note_id}/status`、`DELETE /v1/notes/{note_id}`。创建和删除必须携带 `Idempotency-Key`。笔记原文首先写入 Agent MySQL，再通过 Outbox 投影到 RAG；RAG 任务返回 `pending` 时本地状态保持 `indexing`，不会提前标记为 `indexed`。
+
+Reminder 的 API、功能矩阵、投递保证及灰度/回滚步骤见 [Reminder API](docs/api/agent-reminder-api.md)。
 
 创建会话和 Run：
 

@@ -5,12 +5,13 @@ import "context"
 type EventType string
 
 const (
-	EventTextDelta      EventType = "text.delta"
-	EventToolCompleted  EventType = "tool.completed"
-	EventRunCompleted   EventType = "run.completed"
-	EventRunFailed      EventType = "run.failed"
-	EventStatus         EventType = "run.status"
-	EventDraftCandidate EventType = "note.draft.candidate"
+	EventTextDelta         EventType = "text.delta"
+	EventToolCompleted     EventType = "tool.completed"
+	EventRunCompleted      EventType = "run.completed"
+	EventRunFailed         EventType = "run.failed"
+	EventStatus            EventType = "run.status"
+	EventDraftCandidate    EventType = "note.draft.candidate"
+	EventWorkflowCandidate EventType = "workflow.candidate"
 )
 
 type Event struct {

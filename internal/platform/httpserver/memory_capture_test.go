@@ -240,7 +240,7 @@ func (memoryPilotRunner) StreamMessages(context.Context, []agent.Message) <-chan
 	return events
 }
 
-func TestMemoryChatIntentPilotIsExplicitIndependentAndDefaultOff(t *testing.T) {
+func TestHTTPChatNeverStartsMemoryWorkflowSideEffect(t *testing.T) {
 	authService, cookieHeader, cookie := newMemoryHTTPAuth(t)
 	chatService, err := chat.NewService(context.Background(), chat.NewMemoryRepository(), memoryPilotRunner{}, contextmanager.NewBoundedAssembler(1000, 2, nil), chat.ServiceOptions{DefaultModel: "test"})
 	if err != nil {
@@ -268,11 +268,8 @@ func TestMemoryChatIntentPilotIsExplicitIndependentAndDefaultOff(t *testing.T) {
 	postChatMessage(t, enabled, cookieHeader, "把我的饮料偏好改成咖啡", "explicit")
 	select {
 	case input := <-enabledCapture.started:
-		if input.Owner != (workflow.WorkflowOwner{TenantID: 19, OwnerID: 73}) || input.Query != "把我的饮料偏好改成咖啡" || input.Intent != captureIntent(input.Query) || !strings.HasPrefix(input.IdempotencyKey, "chat:") {
-			t.Fatalf("capture input=%+v", input)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("explicit memory intent did not start independent capture")
+		t.Fatalf("HTTP keyword bypass started capture: %+v", input)
+	case <-time.After(50 * time.Millisecond):
 	}
 }
 

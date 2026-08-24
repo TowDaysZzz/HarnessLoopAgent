@@ -21,7 +21,8 @@ func TestClassifierRoutesIntentAndComplexityIndependently(t *testing.T) {
 		{name: "simple note query", input: "查询我之前的垃圾回收记录", intent: IntentNoteQuery, complexity: ComplexitySimple, needsRAG: true},
 		{name: "specified CLI note query", input: "请查询我之前关于垃圾回收的记录，只根据检索结果回答，并给出来源", intent: IntentNoteQuery, complexity: ComplexitySimple, needsRAG: true},
 		{name: "complex note query", input: "综合我之前的记录，比较并分析其中的垃圾回收方案", intent: IntentNoteQuery, complexity: ComplexityComplex, needsRAG: true},
-		{name: "note create", input: "帮我记住：我偏好简洁回答", intent: IntentNoteCreate, complexity: ComplexitySimple},
+		{name: "memory capture", input: "帮我记住：我偏好简洁回答", intent: IntentMemoryCapture, complexity: ComplexitySimple},
+		{name: "note create", input: "记录一下这条笔记", intent: IntentNoteCreate, complexity: ComplexitySimple},
 		{name: "history summary write from UI case", input: "从历史记录总结一条笔记并记录", intent: IntentNoteCreate, complexity: ComplexitySimple},
 		{name: "conversation summary write", input: "把当前对话整理成一条笔记", intent: IntentNoteCreate, complexity: ComplexitySimple},
 		{name: "note delete", input: "删除这条笔记", intent: IntentNoteDelete, complexity: ComplexitySimple},
@@ -34,6 +35,27 @@ func TestClassifierRoutesIntentAndComplexityIndependently(t *testing.T) {
 				t.Fatalf("Classify() = %#v", got)
 			}
 		})
+	}
+}
+
+func TestClassifierMakesMemoryReminderAndNoteIntentsMutuallyExclusive(t *testing.T) {
+	c := Classifier{MinWriteConfidence: .95}
+	tests := []struct {
+		input string
+		want  DomainIntent
+	}{
+		{"提醒我明天九点提交周报", IntentReminderCreate},
+		{"提醒我之前说过喜欢喝什么", IntentMemoryRecall},
+		{"帮我记住我喜欢喝茶", IntentMemoryCapture},
+		{"把周报提醒改到十点", IntentReminderUpdate},
+		{"取消周报提醒", IntentReminderCancel},
+		{"我有哪些提醒", IntentReminderQuery},
+		{"把当前对话整理成一条笔记", IntentNoteCreate},
+	}
+	for _, test := range tests {
+		if got := c.Classify(test.input); got.Intent != test.want {
+			t.Fatalf("Classify(%q)=%+v want=%s", test.input, got, test.want)
+		}
 	}
 }
 

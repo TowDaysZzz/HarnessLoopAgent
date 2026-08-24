@@ -32,6 +32,7 @@ type Config struct {
 	Auth            AuthConfig
 	Note            NoteConfig
 	Memory          MemoryConfig
+	Reminder        ReminderConfig
 }
 
 type ModelConfig struct {
@@ -149,6 +150,13 @@ type MemoryConfig struct {
 	ProjectionVersion           string
 }
 
+type ReminderConfig struct {
+	Enabled, WorkflowPilotEnabled, DispatcherEnabled, WorkerEnabled        bool
+	BatchSize, MaxBatches, MaxAttempts                                     int
+	LeaseDuration, Interval, MaxHorizon, RetryBaseBackoff, RetryMaxBackoff time.Duration
+	Timezone, ProductionDeliveryAdapter                                    string
+}
+
 type LoadOptions struct {
 	Path  string
 	Model string
@@ -168,6 +176,7 @@ type fileConfig struct {
 	Auth            fileAuthConfig             `yaml:"AUTH"`
 	Note            fileNoteConfig             `yaml:"NOTE"`
 	Memory          fileMemoryConfig           `yaml:"MEMORY"`
+	Reminder        fileReminderConfig         `yaml:"REMINDER"`
 
 	// 保留原有单模型配置格式的兼容性。
 	ModelProvider string `yaml:"MODEL_PROVIDER"`
@@ -272,6 +281,23 @@ type fileMemoryConfig struct {
 	RAGServiceToken             string  `yaml:"RAG_SERVICE_TOKEN"`
 	OwnerClaimSecret            string  `yaml:"OWNER_CLAIM_SECRET"`
 	ProjectionVersion           string  `yaml:"PROJECTION_VERSION"`
+}
+
+type fileReminderConfig struct {
+	Enabled                   bool   `yaml:"ENABLED"`
+	WorkflowPilotEnabled      bool   `yaml:"WORKFLOW_PILOT_ENABLED"`
+	DispatcherEnabled         bool   `yaml:"DISPATCHER_ENABLED"`
+	WorkerEnabled             bool   `yaml:"WORKER_ENABLED"`
+	BatchSize                 int    `yaml:"BATCH_SIZE"`
+	MaxBatches                int    `yaml:"MAX_BATCHES"`
+	MaxAttempts               int    `yaml:"MAX_ATTEMPTS"`
+	LeaseDuration             string `yaml:"LEASE_DURATION"`
+	Interval                  string `yaml:"INTERVAL"`
+	MaxHorizon                string `yaml:"MAX_HORIZON"`
+	RetryBaseBackoff          string `yaml:"RETRY_BASE_BACKOFF"`
+	RetryMaxBackoff           string `yaml:"RETRY_MAX_BACKOFF"`
+	Timezone                  string `yaml:"TIMEZONE"`
+	ProductionDeliveryAdapter string `yaml:"PRODUCTION_DELIVERY_ADAPTER"`
 }
 
 type fileRAGConfig struct {
@@ -379,6 +405,26 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	reminderLease, err := parseDuration("REMINDER_LEASE_DURATION", raw.Reminder.LeaseDuration)
+	if err != nil {
+		return Config{}, err
+	}
+	reminderInterval, err := parseDuration("REMINDER_INTERVAL", raw.Reminder.Interval)
+	if err != nil {
+		return Config{}, err
+	}
+	reminderHorizon, err := parseDuration("REMINDER_MAX_HORIZON", raw.Reminder.MaxHorizon)
+	if err != nil {
+		return Config{}, err
+	}
+	reminderRetryBase, err := parseDuration("REMINDER_RETRY_BASE_BACKOFF", raw.Reminder.RetryBaseBackoff)
+	if err != nil {
+		return Config{}, err
+	}
+	reminderRetryMax, err := parseDuration("REMINDER_RETRY_MAX_BACKOFF", raw.Reminder.RetryMaxBackoff)
+	if err != nil {
+		return Config{}, err
+	}
 
 	cfg := Config{
 		HTTPAddr:        strings.TrimSpace(raw.HTTPAddr),
@@ -437,8 +483,9 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 			Enabled: raw.Auth.Enabled, SessionSecret: strings.TrimSpace(raw.Auth.SessionSecret), SessionTTL: sessionTTL,
 			CookieName: strings.TrimSpace(raw.Auth.CookieName), CookieSecure: raw.Auth.CookieSecure,
 		},
-		Note:   NoteConfig{Enabled: raw.Note.Enabled, KBID: raw.Note.KBID},
-		Memory: MemoryConfig{Enabled: raw.Memory.Enabled, RAGEnabled: raw.Memory.RAGEnabled, ProjectionEnabled: raw.Memory.ProjectionEnabled, WorkflowPilotEnabled: raw.Memory.WorkflowPilotEnabled, RecallMode: strings.TrimSpace(raw.Memory.RecallMode), StructuredPlanMinConfidence: raw.Memory.StructuredPlanMinConfidence, MaxRecallSelectors: raw.Memory.MaxRecallSelectors, MaxExactCandidates: raw.Memory.MaxExactCandidates, MaxCandidateTextChars: raw.Memory.MaxCandidateTextChars, MaxLLMResponseBytes: raw.Memory.MaxLLMResponseBytes, MaxLLMRepairAttempts: raw.Memory.MaxLLMRepairAttempts, DefaultSessionTTL: memorySessionTTL, RecallTarget: raw.Memory.RecallTarget, RecallPageSize: raw.Memory.RecallPageSize, MaxScanned: raw.Memory.MaxScanned, MaxBatches: raw.Memory.MaxBatches, MaxContextChars: raw.Memory.MaxContextChars, ConflictThreshold: raw.Memory.ConflictThreshold, ProjectionBatchSize: raw.Memory.ProjectionBatchSize, ProjectionBaseBackoff: projectionBaseBackoff, ProjectionMaxBackoff: projectionMaxBackoff, ProjectionMaxAttempts: raw.Memory.ProjectionMaxAttempts, RAGEndpoint: strings.TrimRight(strings.TrimSpace(raw.Memory.RAGEndpoint), "/"), RAGTimeout: memoryRAGTimeout, RAGServiceToken: strings.TrimSpace(raw.Memory.RAGServiceToken), OwnerClaimSecret: strings.TrimSpace(raw.Memory.OwnerClaimSecret), ProjectionVersion: strings.TrimSpace(raw.Memory.ProjectionVersion)},
+		Note:     NoteConfig{Enabled: raw.Note.Enabled, KBID: raw.Note.KBID},
+		Memory:   MemoryConfig{Enabled: raw.Memory.Enabled, RAGEnabled: raw.Memory.RAGEnabled, ProjectionEnabled: raw.Memory.ProjectionEnabled, WorkflowPilotEnabled: raw.Memory.WorkflowPilotEnabled, RecallMode: strings.TrimSpace(raw.Memory.RecallMode), StructuredPlanMinConfidence: raw.Memory.StructuredPlanMinConfidence, MaxRecallSelectors: raw.Memory.MaxRecallSelectors, MaxExactCandidates: raw.Memory.MaxExactCandidates, MaxCandidateTextChars: raw.Memory.MaxCandidateTextChars, MaxLLMResponseBytes: raw.Memory.MaxLLMResponseBytes, MaxLLMRepairAttempts: raw.Memory.MaxLLMRepairAttempts, DefaultSessionTTL: memorySessionTTL, RecallTarget: raw.Memory.RecallTarget, RecallPageSize: raw.Memory.RecallPageSize, MaxScanned: raw.Memory.MaxScanned, MaxBatches: raw.Memory.MaxBatches, MaxContextChars: raw.Memory.MaxContextChars, ConflictThreshold: raw.Memory.ConflictThreshold, ProjectionBatchSize: raw.Memory.ProjectionBatchSize, ProjectionBaseBackoff: projectionBaseBackoff, ProjectionMaxBackoff: projectionMaxBackoff, ProjectionMaxAttempts: raw.Memory.ProjectionMaxAttempts, RAGEndpoint: strings.TrimRight(strings.TrimSpace(raw.Memory.RAGEndpoint), "/"), RAGTimeout: memoryRAGTimeout, RAGServiceToken: strings.TrimSpace(raw.Memory.RAGServiceToken), OwnerClaimSecret: strings.TrimSpace(raw.Memory.OwnerClaimSecret), ProjectionVersion: strings.TrimSpace(raw.Memory.ProjectionVersion)},
+		Reminder: ReminderConfig{Enabled: raw.Reminder.Enabled, WorkflowPilotEnabled: raw.Reminder.WorkflowPilotEnabled, DispatcherEnabled: raw.Reminder.DispatcherEnabled, WorkerEnabled: raw.Reminder.WorkerEnabled, BatchSize: raw.Reminder.BatchSize, MaxBatches: raw.Reminder.MaxBatches, MaxAttempts: raw.Reminder.MaxAttempts, LeaseDuration: reminderLease, Interval: reminderInterval, MaxHorizon: reminderHorizon, RetryBaseBackoff: reminderRetryBase, RetryMaxBackoff: reminderRetryMax, Timezone: strings.TrimSpace(raw.Reminder.Timezone), ProductionDeliveryAdapter: strings.TrimSpace(raw.Reminder.ProductionDeliveryAdapter)},
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -495,6 +542,34 @@ func (c Config) Validate() error {
 	}
 	if err := c.Memory.Validate(c.Database.Enabled); err != nil {
 		return err
+	}
+	if err := c.Reminder.Validate(c.Database.Enabled, c.Auth.Enabled, c.Memory.Enabled); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c ReminderConfig) Validate(databaseEnabled, authEnabled, memoryEnabled bool) error {
+	if c.BatchSize < 1 || c.BatchSize > 100 || c.MaxBatches < 1 || c.MaxAttempts < 1 || c.LeaseDuration < time.Second || c.Interval <= 0 || c.MaxHorizon <= 0 || c.RetryBaseBackoff <= 0 || c.RetryMaxBackoff < c.RetryBaseBackoff || c.Timezone != "Asia/Shanghai" {
+		return errors.New("REMINDER limits, durations, retry policy or timezone are invalid")
+	}
+	if !c.Enabled {
+		if c.WorkflowPilotEnabled || c.DispatcherEnabled || c.WorkerEnabled {
+			return errors.New("REMINDER subfeatures require REMINDER_ENABLED")
+		}
+		return nil
+	}
+	if !databaseEnabled || !authEnabled {
+		return errors.New("REMINDER requires DATABASE and AUTH")
+	}
+	if c.WorkflowPilotEnabled && !memoryEnabled {
+		return errors.New("REMINDER workflow pilot requires MEMORY exact recall")
+	}
+	if c.WorkerEnabled && !c.DispatcherEnabled {
+		return errors.New("REMINDER_WORKER_ENABLED requires REMINDER_DISPATCHER_ENABLED")
+	}
+	if c.WorkerEnabled && c.ProductionDeliveryAdapter == "" {
+		return errors.New("REMINDER worker requires a production delivery adapter")
 	}
 	return nil
 }
@@ -680,8 +755,9 @@ func defaultFileConfig() fileConfig {
 		Context: fileContextConfig{
 			MaxInputTokens: 24000, MinRecentMessages: 6, MessageHistoryLimit: 100,
 		},
-		Auth:   fileAuthConfig{SessionTTL: "168h", CookieName: "note_agent_session"},
-		Memory: fileMemoryConfig{RecallMode: "exact-only", StructuredPlanMinConfidence: .75, MaxRecallSelectors: 8, MaxExactCandidates: 40, MaxCandidateTextChars: 16000, MaxLLMResponseBytes: 16384, MaxLLMRepairAttempts: 1, DefaultSessionTTL: "24h", RecallTarget: 10, RecallPageSize: 20, MaxScanned: 200, MaxBatches: 10, MaxContextChars: 12000, ConflictThreshold: .8, ProjectionBatchSize: 50, ProjectionBaseBackoff: "1s", ProjectionMaxBackoff: "5m", ProjectionMaxAttempts: 8, RAGTimeout: "10s", ProjectionVersion: "v1"},
+		Auth:     fileAuthConfig{SessionTTL: "168h", CookieName: "note_agent_session"},
+		Memory:   fileMemoryConfig{RecallMode: "exact-only", StructuredPlanMinConfidence: .75, MaxRecallSelectors: 8, MaxExactCandidates: 40, MaxCandidateTextChars: 16000, MaxLLMResponseBytes: 16384, MaxLLMRepairAttempts: 1, DefaultSessionTTL: "24h", RecallTarget: 10, RecallPageSize: 20, MaxScanned: 200, MaxBatches: 10, MaxContextChars: 12000, ConflictThreshold: .8, ProjectionBatchSize: 50, ProjectionBaseBackoff: "1s", ProjectionMaxBackoff: "5m", ProjectionMaxAttempts: 8, RAGTimeout: "10s", ProjectionVersion: "v1"},
+		Reminder: fileReminderConfig{BatchSize: 20, MaxBatches: 5, MaxAttempts: 8, LeaseDuration: "30s", Interval: "1s", MaxHorizon: "8760h", RetryBaseBackoff: "1s", RetryMaxBackoff: "5m", Timezone: "Asia/Shanghai"},
 	}
 }
 
@@ -751,44 +827,55 @@ func applyServiceEnvironment(raw *fileConfig) error {
 		"SHUTDOWN_TIMEOUT": &raw.ShutdownTimeout,
 	})
 	applyEnvironment(map[string]*string{
-		"RAG_BASE_URL":                   &raw.RAG.BaseURL,
-		"RAG_API_KEY":                    &raw.RAG.APIKey,
-		"RAG_TIMEOUT":                    &raw.RAG.Timeout,
-		"RAG_STRATEGY_PROFILE":           &raw.RAG.StrategyProfile,
-		"AGENT_RUN_TIMEOUT":              &raw.Agent.RunTimeout,
-		"AGENT_TOOL_TIMEOUT":             &raw.Agent.ToolTimeout,
-		"NOTE_DRAFT_TTL":                 &raw.Agent.NoteDraftTTL,
-		"RETRY_BASE_DELAY":               &raw.Resilience.RetryBaseDelay,
-		"RETRY_MAX_DELAY":                &raw.Resilience.RetryMaxDelay,
-		"CIRCUIT_OPEN_TIMEOUT":           &raw.Resilience.CircuitOpenTimeout,
-		"DATABASE_DSN":                   &raw.Database.DSN,
-		"DATABASE_CONN_MAX_LIFETIME":     &raw.Database.ConnMaxLifetime,
-		"AUTH_SESSION_SECRET":            &raw.Auth.SessionSecret,
-		"AUTH_SESSION_TTL":               &raw.Auth.SessionTTL,
-		"AUTH_COOKIE_NAME":               &raw.Auth.CookieName,
-		"MEMORY_DEFAULT_SESSION_TTL":     &raw.Memory.DefaultSessionTTL,
-		"MEMORY_PROJECTION_BASE_BACKOFF": &raw.Memory.ProjectionBaseBackoff,
-		"MEMORY_PROJECTION_MAX_BACKOFF":  &raw.Memory.ProjectionMaxBackoff,
-		"MEMORY_RAG_ENDPOINT":            &raw.Memory.RAGEndpoint,
-		"MEMORY_RAG_TIMEOUT":             &raw.Memory.RAGTimeout,
-		"MEMORY_RAG_SERVICE_TOKEN":       &raw.Memory.RAGServiceToken,
-		"MEMORY_OWNER_CLAIM_SECRET":      &raw.Memory.OwnerClaimSecret,
-		"MEMORY_PROJECTION_VERSION":      &raw.Memory.ProjectionVersion,
-		"MEMORY_RECALL_MODE":             &raw.Memory.RecallMode,
+		"RAG_BASE_URL":                         &raw.RAG.BaseURL,
+		"RAG_API_KEY":                          &raw.RAG.APIKey,
+		"RAG_TIMEOUT":                          &raw.RAG.Timeout,
+		"RAG_STRATEGY_PROFILE":                 &raw.RAG.StrategyProfile,
+		"AGENT_RUN_TIMEOUT":                    &raw.Agent.RunTimeout,
+		"AGENT_TOOL_TIMEOUT":                   &raw.Agent.ToolTimeout,
+		"NOTE_DRAFT_TTL":                       &raw.Agent.NoteDraftTTL,
+		"RETRY_BASE_DELAY":                     &raw.Resilience.RetryBaseDelay,
+		"RETRY_MAX_DELAY":                      &raw.Resilience.RetryMaxDelay,
+		"CIRCUIT_OPEN_TIMEOUT":                 &raw.Resilience.CircuitOpenTimeout,
+		"DATABASE_DSN":                         &raw.Database.DSN,
+		"DATABASE_CONN_MAX_LIFETIME":           &raw.Database.ConnMaxLifetime,
+		"AUTH_SESSION_SECRET":                  &raw.Auth.SessionSecret,
+		"AUTH_SESSION_TTL":                     &raw.Auth.SessionTTL,
+		"AUTH_COOKIE_NAME":                     &raw.Auth.CookieName,
+		"MEMORY_DEFAULT_SESSION_TTL":           &raw.Memory.DefaultSessionTTL,
+		"MEMORY_PROJECTION_BASE_BACKOFF":       &raw.Memory.ProjectionBaseBackoff,
+		"MEMORY_PROJECTION_MAX_BACKOFF":        &raw.Memory.ProjectionMaxBackoff,
+		"MEMORY_RAG_ENDPOINT":                  &raw.Memory.RAGEndpoint,
+		"MEMORY_RAG_TIMEOUT":                   &raw.Memory.RAGTimeout,
+		"MEMORY_RAG_SERVICE_TOKEN":             &raw.Memory.RAGServiceToken,
+		"MEMORY_OWNER_CLAIM_SECRET":            &raw.Memory.OwnerClaimSecret,
+		"MEMORY_PROJECTION_VERSION":            &raw.Memory.ProjectionVersion,
+		"MEMORY_RECALL_MODE":                   &raw.Memory.RecallMode,
+		"REMINDER_LEASE_DURATION":              &raw.Reminder.LeaseDuration,
+		"REMINDER_INTERVAL":                    &raw.Reminder.Interval,
+		"REMINDER_MAX_HORIZON":                 &raw.Reminder.MaxHorizon,
+		"REMINDER_RETRY_BASE_BACKOFF":          &raw.Reminder.RetryBaseBackoff,
+		"REMINDER_RETRY_MAX_BACKOFF":           &raw.Reminder.RetryMaxBackoff,
+		"REMINDER_TIMEZONE":                    &raw.Reminder.Timezone,
+		"REMINDER_PRODUCTION_DELIVERY_ADAPTER": &raw.Reminder.ProductionDeliveryAdapter,
 	})
 	for key, target := range map[string]*bool{
-		"DATABASE_ENABLED":               &raw.Database.Enabled,
-		"DATABASE_AUTO_MIGRATE":          &raw.Database.AutoMigrate,
-		"AUTH_ENABLED":                   &raw.Auth.Enabled,
-		"AUTH_COOKIE_SECURE":             &raw.Auth.CookieSecure,
-		"NOTE_ENABLED":                   &raw.Note.Enabled,
-		"ENABLE_MULTI_AGENT":             &raw.Agent.EnableMultiAgent,
-		"ENABLE_INTENT_ROUTING":          &raw.Agent.EnableIntentRouting,
-		"ENABLE_LEGACY_ROUTING_FALLBACK": &raw.Agent.EnableLegacyRoutingFallback,
-		"MEMORY_ENABLED":                 &raw.Memory.Enabled,
-		"MEMORY_RAG_ENABLED":             &raw.Memory.RAGEnabled,
-		"MEMORY_PROJECTION_ENABLED":      &raw.Memory.ProjectionEnabled,
-		"MEMORY_WORKFLOW_PILOT_ENABLED":  &raw.Memory.WorkflowPilotEnabled,
+		"DATABASE_ENABLED":                &raw.Database.Enabled,
+		"DATABASE_AUTO_MIGRATE":           &raw.Database.AutoMigrate,
+		"AUTH_ENABLED":                    &raw.Auth.Enabled,
+		"AUTH_COOKIE_SECURE":              &raw.Auth.CookieSecure,
+		"NOTE_ENABLED":                    &raw.Note.Enabled,
+		"ENABLE_MULTI_AGENT":              &raw.Agent.EnableMultiAgent,
+		"ENABLE_INTENT_ROUTING":           &raw.Agent.EnableIntentRouting,
+		"ENABLE_LEGACY_ROUTING_FALLBACK":  &raw.Agent.EnableLegacyRoutingFallback,
+		"MEMORY_ENABLED":                  &raw.Memory.Enabled,
+		"MEMORY_RAG_ENABLED":              &raw.Memory.RAGEnabled,
+		"MEMORY_PROJECTION_ENABLED":       &raw.Memory.ProjectionEnabled,
+		"MEMORY_WORKFLOW_PILOT_ENABLED":   &raw.Memory.WorkflowPilotEnabled,
+		"REMINDER_ENABLED":                &raw.Reminder.Enabled,
+		"REMINDER_WORKFLOW_PILOT_ENABLED": &raw.Reminder.WorkflowPilotEnabled,
+		"REMINDER_DISPATCHER_ENABLED":     &raw.Reminder.DispatcherEnabled,
+		"REMINDER_WORKER_ENABLED":         &raw.Reminder.WorkerEnabled,
 	} {
 		if err := applyBoolEnvironment(key, target); err != nil {
 			return err
@@ -853,6 +940,9 @@ func applyServiceEnvironment(raw *fileConfig) error {
 		"MEMORY_MAX_CANDIDATE_TEXT_CHARS": &raw.Memory.MaxCandidateTextChars,
 		"MEMORY_MAX_LLM_RESPONSE_BYTES":   &raw.Memory.MaxLLMResponseBytes,
 		"MEMORY_MAX_LLM_REPAIR_ATTEMPTS":  &raw.Memory.MaxLLMRepairAttempts,
+		"REMINDER_BATCH_SIZE":             &raw.Reminder.BatchSize,
+		"REMINDER_MAX_BATCHES":            &raw.Reminder.MaxBatches,
+		"REMINDER_MAX_ATTEMPTS":           &raw.Reminder.MaxAttempts,
 	} {
 		if err := applyIntEnvironment(key, target); err != nil {
 			return err

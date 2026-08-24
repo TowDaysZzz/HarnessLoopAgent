@@ -56,6 +56,24 @@ MEMORY:
   OWNER_CLAIM_SECRET: ""
   PROJECTION_VERSION: "v1"
 
+# Reminder 默认关闭。首版仅支持 Asia/Shanghai 的一次性提醒。
+# WORKER_ENABLED 只能在接入支持稳定 delivery key 的生产适配器后开启。
+REMINDER:
+  ENABLED: false
+  WORKFLOW_PILOT_ENABLED: false
+  DISPATCHER_ENABLED: false
+  WORKER_ENABLED: false
+  BATCH_SIZE: 20
+  MAX_BATCHES: 5
+  MAX_ATTEMPTS: 8
+  LEASE_DURATION: "30s"
+  INTERVAL: "1s"
+  MAX_HORIZON: "8760h"
+  RETRY_BASE_BACKOFF: "1s"
+  RETRY_MAX_BACKOFF: "5m"
+  TIMEZONE: "Asia/Shanghai"
+  PRODUCTION_DELIVERY_ADAPTER: ""
+
 # 当前使用有界最近消息窗口。后续 ProgressiveCompactor 将实现同一组装接口。
 CONTEXT:
   MAX_INPUT_TOKENS: 24000

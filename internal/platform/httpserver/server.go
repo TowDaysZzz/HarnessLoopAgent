@@ -20,6 +20,8 @@ import (
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/mcpfacade"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/memoryworkflow"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/note"
+	"github.com/TowDaysZzz/HarnessLoopAgent/internal/reminder"
+	"github.com/TowDaysZzz/HarnessLoopAgent/internal/reminderworkflow"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/workflow"
 )
 
@@ -36,7 +38,8 @@ type serverOptions struct {
 	mcp             *mcpfacade.Facade
 	knowledgeBase   *knowledgebase.Service
 	memoryCapture   MemoryCaptureService
-	memoryChatPilot bool
+	reminderCommand ReminderCommandService
+	reminderRepo    reminder.Repository
 	authCookie      AuthCookieConfig
 }
 
@@ -45,6 +48,12 @@ type MemoryCaptureService interface {
 	Get(context.Context, workflow.WorkflowOwner, workflow.WorkflowRunID) (memoryworkflow.CaptureDTO, error)
 	GetReview(context.Context, workflow.WorkflowOwner, workflow.WorkflowRunID) (memoryworkflow.ReviewDTO, error)
 	Resume(context.Context, memoryworkflow.ResumeCaptureInput) (memoryworkflow.CaptureDTO, error)
+}
+
+type ReminderCommandService interface {
+	Start(context.Context, reminderworkflow.StartInput) (reminderworkflow.CommandDTO, error)
+	Get(context.Context, workflow.WorkflowOwner, workflow.WorkflowRunID) (reminderworkflow.CommandDTO, error)
+	Resume(context.Context, reminderworkflow.ResumeInput) (reminderworkflow.CommandDTO, error)
 }
 
 type AuthCookieConfig struct {
@@ -80,8 +89,16 @@ func WithMemoryCaptureService(service MemoryCaptureService) Option {
 	return func(options *serverOptions) { options.memoryCapture = service }
 }
 
+func WithReminderServices(command ReminderCommandService, repository reminder.Repository) Option {
+	return func(options *serverOptions) {
+		options.reminderCommand, options.reminderRepo = command, repository
+	}
+}
+
 func WithMemoryChatIntentPilot(enabled bool) Option {
-	return func(options *serverOptions) { options.memoryChatPilot = enabled }
+	// Deprecated compatibility option. Chat side effects are owned by the
+	// routing Executor; the HTTP transport never starts a Memory workflow.
+	return func(options *serverOptions) {}
 }
 
 func New(addr string, ready func() bool, options ...Option) *Server {
@@ -98,11 +115,7 @@ func New(addr string, ready func() bool, options ...Option) *Server {
 		c.JSON(consts.StatusOK, map[string]string{"status": "ok"})
 	})
 	if configured.chat != nil {
-		var memoryPilot MemoryCaptureService
-		if configured.memoryChatPilot && configured.auth != nil {
-			memoryPilot = configured.memoryCapture
-		}
-		registerChatRoutes(h, configured.chat, configured.auth, configured.authCookie, configured.knowledgeBase, memoryPilot)
+		registerChatRoutes(h, configured.chat, configured.auth, configured.authCookie, configured.knowledgeBase)
 	}
 	if configured.auth != nil {
 		registerAuthRoutes(h, configured.auth, configured.authCookie)
@@ -118,6 +131,9 @@ func New(addr string, ready func() bool, options ...Option) *Server {
 		if configured.memoryCapture != nil {
 			registerMemoryCaptureRoutes(h, configured.auth, configured.memoryCapture, configured.authCookie)
 		}
+		if configured.reminderCommand != nil && configured.reminderRepo != nil {
+			registerReminderRoutes(h, configured.auth, configured.reminderCommand, configured.reminderRepo, configured.authCookie)
+		}
 	}
 	h.GET("/readyz", func(ctx context.Context, c *app.RequestContext) {
 		if !ready() {
@@ -130,7 +146,7 @@ func New(addr string, ready func() bool, options ...Option) *Server {
 	return &Server{hertz: h}
 }
 
-func registerChatRoutes(h *server.Hertz, service *chat.Service, authService *agentauth.Service, cookie AuthCookieConfig, knowledgeBaseService *knowledgebase.Service, memoryPilot MemoryCaptureService) {
+func registerChatRoutes(h *server.Hertz, service *chat.Service, authService *agentauth.Service, cookie AuthCookieConfig, knowledgeBaseService *knowledgebase.Service) {
 	protect := func(handler app.HandlerFunc) app.HandlerFunc {
 		if authService == nil {
 			return handler
@@ -216,9 +232,6 @@ func registerChatRoutes(h *server.Hertz, service *chat.Service, authService *age
 		if err != nil {
 			writeServiceError(c, err)
 			return
-		}
-		if created.Created && memoryPilot != nil && explicitMemoryIntent(request.Message) {
-			startChatMemoryCapture(memoryPilot, principal, created.Run.ID, request.Message)
 		}
 		status := consts.StatusAccepted
 		if !created.Created {

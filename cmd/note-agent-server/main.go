@@ -51,6 +51,8 @@ func run() error {
 
 	var serverOptions []httpserver.Option
 	var store *mysqlstore.Store
+	var memoryRuntime *memoryRuntimeAssembly
+	var reminderRuntime *reminderRuntimeAssembly
 	if cfg.Database.Enabled {
 		store, err = mysqlstore.Open(ctx, mysqlstore.Options{
 			DSN: cfg.Database.DSN, MaxOpenConns: cfg.Database.MaxOpenConns,
@@ -83,7 +85,8 @@ func run() error {
 					return memoryStartupError("rag")
 				}
 			}
-			memoryRuntime, memoryErr := assembleMemoryRuntime(cfg.Memory, memoryRuntimeDependencies{
+			var memoryErr error
+			memoryRuntime, memoryErr = assembleMemoryRuntime(cfg.Memory, memoryRuntimeDependencies{
 				Repository: store, WorkflowStore: store.WorkflowStore(), EditPayloadStore: store,
 				ProjectionBacklog: store, Runner: agentRunner, RAG: memoryRAG,
 			})
@@ -95,6 +98,16 @@ func run() error {
 					httpserver.WithMemoryCaptureService(memoryRuntime.Capture),
 					httpserver.WithMemoryChatIntentPilot(cfg.Memory.WorkflowPilotEnabled),
 				)
+			}
+		}
+		if cfg.Reminder.Enabled {
+			reminderRuntime, err = assembleReminderRuntime(cfg.Reminder, reminderRuntimeDependencies{Repository: store, MemoryRepository: store, WorkflowStore: store.WorkflowStore(), EditPayloadStore: store, Runner: agentRunner})
+			if err != nil {
+				return err
+			}
+			reminderRuntime.Start(ctx)
+			if reminderRuntime.Command != nil {
+				serverOptions = append(serverOptions, httpserver.WithReminderServices(reminderRuntime.Command, store))
 			}
 		}
 		var noteService *note.Service
@@ -153,13 +166,35 @@ func run() error {
 			return err
 		}
 		var noteCreateHandler routing.DeterministicHandler = routing.StaticTextHandler{Text: "当前服务未启用笔记写入，请联系管理员检查 NOTE 配置。"}
+		var memoryCaptureHandler routing.DeterministicHandler = routing.StaticTextHandler{Text: "当前服务未启用记忆写入。"}
+		var memoryRecallHandler routing.DeterministicHandler = routing.StaticTextHandler{Text: "当前服务未启用记忆查询。"}
+		var reminderCommandHandler routing.DeterministicHandler = routing.StaticTextHandler{Text: "当前服务未启用提醒写入。"}
+		var reminderQueryHandler routing.DeterministicHandler = routing.StaticTextHandler{Text: "当前服务未启用提醒查询。"}
 		if noteService != nil {
 			noteCreateHandler = intentexecutor.NoteCreateHandler{
 				Notes: noteService, Projector: noteService, Drafts: draftService, Summarizer: intentexecutor.RunnerSummarizer{Runner: agentRunner},
 			}
 		}
+		if memoryRuntime != nil {
+			if memoryRuntime.Capture != nil {
+				memoryCaptureHandler = intentexecutor.MemoryCaptureHandler{Service: memoryRuntime.Capture}
+			}
+			if memoryRuntime.Adapter != nil && memoryRuntime.Recall != nil {
+				memoryRecallHandler = intentexecutor.MemoryRecallHandler{Planner: memoryRuntime.Adapter, Recall: memoryRuntime.Recall}
+			}
+		}
+		if reminderRuntime != nil {
+			if reminderRuntime.Command != nil {
+				reminderCommandHandler = intentexecutor.ReminderCommandHandler{Service: reminderRuntime.Command}
+			}
+			if reminderRuntime.Query != nil {
+				reminderQueryHandler = intentexecutor.ReminderQueryHandler{Service: reminderRuntime.Query, Limit: 20}
+			}
+		}
 		executor, err := routing.NewFacade(routing.HandlerSet{
 			NoteCreate: noteCreateHandler, Clarification: routing.ClarificationHandler{}, DeleteRejected: routing.DeleteRejectedHandler{},
+			MemoryCapture: memoryCaptureHandler, MemoryRecall: memoryRecallHandler,
+			ReminderCreate: reminderCommandHandler, ReminderUpdate: reminderCommandHandler, ReminderCancel: reminderCommandHandler, ReminderQuery: reminderQueryHandler,
 			SimpleChat: routing.ConversationHandler{Runner: agentRunner}, SimpleNoteQuery: routing.ConversationHandler{Runner: agentRunner},
 			ComplexChat: complexHandler, ComplexNoteQuery: complexHandler,
 		})

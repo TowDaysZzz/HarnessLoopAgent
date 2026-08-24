@@ -6,7 +6,6 @@ import (
 	"errors"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/app/server"
@@ -112,40 +111,6 @@ func captureIntent(query string) memory.IntentAuthority {
 		}
 	}
 	return memory.IntentUserStatement
-}
-
-func explicitMemoryIntent(query string) bool {
-	normalized := strings.ToLower(strings.TrimSpace(query))
-	if normalized == "" {
-		return false
-	}
-	for _, marker := range []string{"记住", "请记得", "remember ", "remember:"} {
-		if strings.Contains(normalized, marker) {
-			return true
-		}
-	}
-	hasCorrection := false
-	for _, marker := range []string{"修改", "更改", "纠正", "改成", "update", "correct"} {
-		hasCorrection = hasCorrection || strings.Contains(normalized, marker)
-	}
-	hasMemorySubject := false
-	for _, marker := range []string{"偏好", "喜好", "习惯", "记忆", "preference", "memory"} {
-		hasMemorySubject = hasMemorySubject || strings.Contains(normalized, marker)
-	}
-	return hasCorrection && hasMemorySubject
-}
-
-func startChatMemoryCapture(service MemoryCaptureService, principal agentauth.Principal, chatRunID, query string) {
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		_, _ = service.Start(ctx, memoryworkflow.StartCaptureInput{
-			Owner:          workflowOwner(principal),
-			Query:          query,
-			IdempotencyKey: "chat:" + chatRunID,
-			Intent:         captureIntent(query),
-		})
-	}()
 }
 
 func writeMemoryCaptureError(c *app.RequestContext, err error) {

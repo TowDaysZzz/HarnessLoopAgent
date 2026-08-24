@@ -28,6 +28,12 @@ type StreamingHandler interface {
 
 type HandlerSet struct {
 	NoteCreate       DeterministicHandler
+	MemoryCapture    DeterministicHandler
+	MemoryRecall     DeterministicHandler
+	ReminderCreate   DeterministicHandler
+	ReminderQuery    DeterministicHandler
+	ReminderUpdate   DeterministicHandler
+	ReminderCancel   DeterministicHandler
 	Clarification    DeterministicHandler
 	DeleteRejected   DeterministicHandler
 	SimpleChat       StreamingHandler
@@ -54,6 +60,18 @@ func (f *Facade) Execute(ctx context.Context, input Input) (Execution, error) {
 	switch decision.Intent {
 	case IntentNoteCreate:
 		return f.deterministic(ctx, "note_create", f.handlers.NoteCreate, input)
+	case IntentMemoryCapture:
+		return f.deterministic(ctx, "memory_capture", f.handlers.MemoryCapture, input)
+	case IntentMemoryRecall:
+		return f.deterministic(ctx, "memory_recall", f.handlers.MemoryRecall, input)
+	case IntentReminderCreate:
+		return f.deterministic(ctx, "reminder_create", f.handlers.ReminderCreate, input)
+	case IntentReminderQuery:
+		return f.deterministic(ctx, "reminder_query", f.handlers.ReminderQuery, input)
+	case IntentReminderUpdate:
+		return f.deterministic(ctx, "reminder_update", f.handlers.ReminderUpdate, input)
+	case IntentReminderCancel:
+		return f.deterministic(ctx, "reminder_cancel", f.handlers.ReminderCancel, input)
 	case IntentNoteDelete:
 		return f.deterministic(ctx, "note_delete_rejected", f.handlers.DeleteRejected, input)
 	case IntentUnclear:
@@ -88,6 +106,12 @@ func (f *Facade) deterministic(ctx context.Context, name string, handler Determi
 		if result.Candidate != nil {
 			encoded, _ := json.Marshal(result.Candidate)
 			if !emitAgentEvent(ctx, out, agent.Event{Type: agent.EventDraftCandidate, Delta: string(encoded)}) {
+				return
+			}
+		}
+		if result.WorkflowCandidate != nil {
+			encoded, _ := json.Marshal(result.WorkflowCandidate)
+			if !emitAgentEvent(ctx, out, agent.Event{Type: agent.EventWorkflowCandidate, Delta: string(encoded)}) {
 				return
 			}
 		}

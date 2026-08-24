@@ -3,16 +3,26 @@ package routing
 import (
 	"context"
 	"strings"
+	"time"
+
+	"github.com/TowDaysZzz/HarnessLoopAgent/internal/reminder"
+	"github.com/TowDaysZzz/HarnessLoopAgent/internal/workflow"
 )
 
 type DomainIntent string
 
 const (
-	IntentNoteCreate DomainIntent = "note.create"
-	IntentNoteDelete DomainIntent = "note.delete"
-	IntentNoteQuery  DomainIntent = "note.query"
-	IntentChat       DomainIntent = "chat"
-	IntentUnclear    DomainIntent = "intent.unclear"
+	IntentNoteCreate     DomainIntent = "note.create"
+	IntentNoteDelete     DomainIntent = "note.delete"
+	IntentNoteQuery      DomainIntent = "note.query"
+	IntentMemoryCapture  DomainIntent = "memory.capture"
+	IntentMemoryRecall   DomainIntent = "memory.recall"
+	IntentReminderCreate DomainIntent = "reminder.create"
+	IntentReminderQuery  DomainIntent = "reminder.query"
+	IntentReminderUpdate DomainIntent = "reminder.update"
+	IntentReminderCancel DomainIntent = "reminder.cancel"
+	IntentChat           DomainIntent = "chat"
+	IntentUnclear        DomainIntent = "intent.unclear"
 )
 
 type Complexity string
@@ -43,8 +53,23 @@ func (c Classifier) Classify(input string) RouteDecision {
 	if text == "" {
 		return RouteDecision{Intent: IntentUnclear, Complexity: ComplexitySimple, Deterministic: true, Confidence: 1, Reason: "empty_input"}
 	}
-	if containsAny(text, "忽略之前", "忽略系统", "绕过权限", "伪造身份", "修改tenant", "修改 tenant") && containsAny(text, "帮我记住", "记一笔", "保存笔记", "记录一下", "记下来", "删除笔记", "帮我删") {
+	if containsAny(text, "忽略之前", "忽略系统", "绕过权限", "伪造身份", "修改tenant", "修改 tenant") && containsAny(text, "帮我记住", "记一笔", "保存笔记", "记录一下", "记下来", "删除笔记", "帮我删", "提醒我", "取消提醒") {
 		return RouteDecision{Intent: IntentUnclear, Complexity: complexity, Deterministic: true, Confidence: 1, Reason: "prompt_injection_write"}
+	}
+	if containsAny(text, "取消提醒", "删除提醒", "不要提醒") || containsAny(text, "取消", "删除", "停止") && strings.Contains(text, "提醒") {
+		return c.enforceWriteConfidence(RouteDecision{Intent: IntentReminderCancel, Complexity: complexity, Deterministic: true, NeedsModel: true, Confidence: .98, Reason: "explicit_reminder_cancel"})
+	}
+	if containsAny(text, "提醒") && containsAny(text, "改到", "改成", "修改为", "推迟到", "提前到") {
+		return c.enforceWriteConfidence(RouteDecision{Intent: IntentReminderUpdate, Complexity: complexity, Deterministic: true, NeedsModel: true, Confidence: .98, Reason: "explicit_reminder_update"})
+	}
+	if containsAny(text, "有哪些提醒", "有什么提醒", "查看提醒", "查询提醒", "待办提醒") {
+		return RouteDecision{Intent: IntentReminderQuery, Complexity: complexity, Deterministic: true, NeedsModel: true, Confidence: .98, Reason: "explicit_reminder_query"}
+	}
+	if isMemoryRecall(text) {
+		return RouteDecision{Intent: IntentMemoryRecall, Complexity: complexity, NeedsModel: true, Confidence: .96, Reason: "explicit_memory_recall"}
+	}
+	if isReminderCreate(text) {
+		return c.enforceWriteConfidence(RouteDecision{Intent: IntentReminderCreate, Complexity: complexity, Deterministic: true, NeedsModel: true, Confidence: .98, Reason: "future_reminder_write"})
 	}
 	if containsAny(text, "删除笔记", "删除这条笔记", "删掉笔记", "删除记录", "帮我删") {
 		return RouteDecision{Intent: IntentNoteDelete, Complexity: complexity, Deterministic: true, Confidence: .98, Reason: "explicit_delete"}
@@ -54,7 +79,10 @@ func (c Classifier) Classify(input string) RouteDecision {
 	if isHistorySummaryWrite(text) {
 		return c.enforceWriteConfidence(RouteDecision{Intent: IntentNoteCreate, Complexity: complexity, Deterministic: true, NeedsModel: true, Confidence: .98, Reason: "history_summary_write"})
 	}
-	if containsAny(text, "帮我记住", "记一笔", "保存笔记", "记录一下", "记下来", "总结刚才") {
+	if containsAny(text, "帮我记住", "记住我", "请记得我") {
+		return c.enforceWriteConfidence(RouteDecision{Intent: IntentMemoryCapture, Complexity: complexity, Deterministic: true, NeedsModel: true, Confidence: .98, Reason: "explicit_memory_capture"})
+	}
+	if containsAny(text, "记一笔", "保存笔记", "记录一下", "记下来", "总结刚才") {
 		return c.enforceWriteConfidence(RouteDecision{Intent: IntentNoteCreate, Complexity: complexity, Deterministic: true, NeedsModel: containsAny(text, "总结刚才", "总结以上", "从聊天历史"), Confidence: .98, Reason: "explicit_note_write"})
 	}
 	if containsAny(text, "也许可以记录", "可能要记", "或许记下") {
@@ -64,6 +92,20 @@ func (c Classifier) Classify(input string) RouteDecision {
 		return RouteDecision{Intent: IntentNoteQuery, Complexity: complexity, NeedsRAG: true, NeedsModel: true, Confidence: .95, Reason: "historical_note_query"}
 	}
 	return RouteDecision{Intent: IntentChat, Complexity: complexity, NeedsModel: true, Confidence: .8, Reason: "default_chat"}
+}
+
+func isMemoryRecall(text string) bool {
+	if containsAny(text, "之前说过", "之前喜欢", "以前说过", "还记得", "我的偏好是什么", "记忆里") {
+		return containsAny(text, "提醒我", "告诉我", "查询", "什么", "吗", "记得")
+	}
+	return false
+}
+
+func isReminderCreate(text string) bool {
+	if !containsAny(text, "提醒我", "请提醒", "记得提醒") {
+		return false
+	}
+	return containsAny(text, "今天", "明天", "后天", "下周", "下个月", "点", "时", "分钟后", "小时后", "日期", "上午", "下午", "晚上")
 }
 
 func isHistorySummaryWrite(text string) bool {
@@ -124,10 +166,30 @@ type Executor interface {
 }
 
 type Result struct {
-	Text        string
-	Citations   []string
-	NeedConfirm bool
-	Candidate   *NoteCandidate
+	Text              string
+	Citations         []string
+	NeedConfirm       bool
+	Candidate         *NoteCandidate
+	WorkflowCandidate *WorkflowCandidate
+}
+
+type WorkflowCandidate struct {
+	Kind           string                   `json:"kind"`
+	RunID          string                   `json:"run_id"`
+	Status         string                   `json:"status"`
+	WaitID         string                   `json:"wait_id,omitempty"`
+	Version        uint64                   `json:"version,omitempty"`
+	ContentHash    string                   `json:"content_hash,omitempty"`
+	ExpiresAt      *time.Time               `json:"expires_at,omitempty"`
+	AllowedActions []workflow.HumanAction   `json:"allowed_actions,omitempty"`
+	Action         reminder.Action          `json:"action,omitempty"`
+	Content        string                   `json:"content,omitempty"`
+	ScheduledAt    *time.Time               `json:"scheduled_at,omitempty"`
+	Timezone       string                   `json:"timezone,omitempty"`
+	Target         *reminder.ReminderRef    `json:"target,omitempty"`
+	TargetChoices  []reminder.ReminderRef   `json:"target_choices,omitempty"`
+	MemorySummary  []reminder.MemorySummary `json:"memory_summary,omitempty"`
+	Clarification  *reminder.Clarification  `json:"clarification,omitempty"`
 }
 
 type NoteCandidate struct {

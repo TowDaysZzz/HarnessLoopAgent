@@ -299,7 +299,7 @@ func (s *Service) execute(runID string, owner Owner, userAccessToken string, kno
 				s.fail(runID, RunFailed, "persist_event_failed", err)
 				return
 			}
-		case agent.EventDraftCandidate:
+		case agent.EventDraftCandidate, agent.EventWorkflowCandidate:
 			data := map[string]any{}
 			if err := json.Unmarshal([]byte(event.Delta), &data); err != nil {
 				s.fail(runID, RunFailed, "invalid_candidate_event", err)

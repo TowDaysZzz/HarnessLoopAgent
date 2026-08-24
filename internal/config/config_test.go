@@ -291,6 +291,34 @@ func TestIntentRoutingConfigDefaults(t *testing.T) {
 	}
 }
 
+func TestReminderConfigDefaultsOffAndRejectsInvalidFeatureMatrix(t *testing.T) {
+	clearOverrides(t)
+	cfg, err := LoadWithOptions(LoadOptions{Path: writeConfig(t, "MODEL_NAME: test\nMODEL_API_KEY: key\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Reminder.Enabled || cfg.Reminder.WorkflowPilotEnabled || cfg.Reminder.DispatcherEnabled || cfg.Reminder.WorkerEnabled || cfg.Reminder.Timezone != "Asia/Shanghai" {
+		t.Fatalf("defaults=%+v", cfg.Reminder)
+	}
+	base := cfg.Reminder
+	base.Enabled, base.WorkflowPilotEnabled = true, true
+	if err := base.Validate(true, true, false); err == nil {
+		t.Fatal("workflow pilot accepted without memory exact recall")
+	}
+	base.WorkflowPilotEnabled, base.DispatcherEnabled, base.WorkerEnabled = false, true, true
+	if err := base.Validate(true, true, true); err == nil {
+		t.Fatal("worker accepted without production adapter")
+	}
+	base.ProductionDeliveryAdapter = "idempotent-provider"
+	if err := base.Validate(true, true, true); err != nil {
+		t.Fatal(err)
+	}
+	base.Timezone = "UTC"
+	if err := base.Validate(true, true, true); err == nil {
+		t.Fatal("unsupported timezone accepted")
+	}
+}
+
 func TestMemoryConfigDefaultsAreSafeAndDisabled(t *testing.T) {
 	clearOverrides(t)
 	cfg, err := LoadWithOptions(LoadOptions{Path: writeConfig(t, "MODEL_NAME: test\nMODEL_API_KEY: key\n")})
