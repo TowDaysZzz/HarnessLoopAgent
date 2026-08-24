@@ -24,13 +24,13 @@ GOCACHE=/tmp/harnessloopagent-go-cache \
 go test -v ./internal/memoryworkflow ./internal/platform/mysqlstore
 ```
 
-本次环境未设置 `MYSQL_INTEGRATION_DSN`，因此以下测试按明确门控显示 `SKIP`，没有记为真实数据库通过：
+已使用隔离的 MySQL 8.4 容器和全新空数据库设置 `MYSQL_INTEGRATION_DSN`，按上述默认并行命令完成真实数据库验证。以下门控测试均为 `PASS`：
 
 - `TestMySQLOnlyMemoryCaptureRestartRecallCorrectionEditAndDeferredOutbox`
 - `TestMemoryMigrationAndRepositoryLifecycle`
 - MySQL `EXPLAIN FORMAT=JSON` 精确索引测试
 
-普通测试、fake Repository 应用闭环、HTTP race 和 OpenSpec strict validation 均已通过。发布到测试环境前必须设置 DSN 再执行上述真实 MySQL 套件。
+验证过程中同时覆盖了并发迁移、durable Workflow 生命周期、Repository 生命周期、原子 supersede、候选状态迁移与过期。普通测试、fake Repository 应用闭环、HTTP race 和 OpenSpec validation 也均已通过。发布到测试环境时仍应使用目标环境的临时数据库 DSN 再执行一次上述套件。
 
 ## 回滚与未来迁移
 

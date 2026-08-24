@@ -2,20 +2,23 @@ package mysqlstore
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"strings"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
-
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/chat"
+	"gorm.io/driver/mysql"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+	"gorm.io/gorm/logger"
 )
 
 type Store struct {
-	db                *sql.DB
+	db                *gorm.DB
 	projectionVersion string
 }
 
@@ -31,214 +34,190 @@ func Open(ctx context.Context, options Options) (*Store, error) {
 	if options.DSN == "" {
 		return nil, errors.New("database DSN is required")
 	}
-	db, err := sql.Open("mysql", options.DSN)
+	db, err := gorm.Open(mysql.Open(options.DSN), &gorm.Config{SkipDefaultTransaction: true, PrepareStmt: false, TranslateError: true, Logger: logger.New(log.New(io.Discard, "", 0), logger.Config{LogLevel: logger.Silent, ParameterizedQueries: true})})
 	if err != nil {
 		return nil, fmt.Errorf("open mysql: %w", err)
 	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		return nil, fmt.Errorf("get mysql connection pool: %w", err)
+	}
 	if options.MaxOpenConns > 0 {
-		db.SetMaxOpenConns(options.MaxOpenConns)
+		sqlDB.SetMaxOpenConns(options.MaxOpenConns)
 	}
 	if options.MaxIdleConns >= 0 {
-		db.SetMaxIdleConns(options.MaxIdleConns)
+		sqlDB.SetMaxIdleConns(options.MaxIdleConns)
 	}
 	if options.ConnMaxLifetime > 0 {
-		db.SetConnMaxLifetime(options.ConnMaxLifetime)
+		sqlDB.SetConnMaxLifetime(options.ConnMaxLifetime)
 	}
-	if err := db.PingContext(ctx); err != nil {
-		db.Close()
+	if err := sqlDB.PingContext(ctx); err != nil {
+		sqlDB.Close()
 		return nil, fmt.Errorf("ping mysql: %w", err)
 	}
-	projectionVersion := strings.TrimSpace(options.ProjectionVersion)
-	if len(projectionVersion) > 128 {
-		db.Close()
+	version := strings.TrimSpace(options.ProjectionVersion)
+	if len(version) > 128 {
+		sqlDB.Close()
 		return nil, errors.New("memory projection version is too large")
 	}
-	return &Store{db: db, projectionVersion: projectionVersion}, nil
+	return &Store{db: db, projectionVersion: version}, nil
 }
 
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error {
+	db, err := s.db.DB()
+	if err != nil {
+		return err
+	}
+	return db.Close()
+}
 
-func (s *Store) CreateSession(ctx context.Context, session chat.Session) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO chat_sessions (id, user_id, tenant_id, title, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		session.ID, session.UserID, session.TenantID, session.Title, session.Status, session.CreatedAt, session.UpdatedAt)
-	return err
+func (s *Store) CreateSession(ctx context.Context, value chat.Session) error {
+	return s.db.WithContext(ctx).Create(&chatSessionRow{ID: value.ID, UserID: value.UserID, TenantID: value.TenantID, Title: value.Title, Status: value.Status, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt}).Error
 }
 
 func (s *Store) ListSessions(ctx context.Context, owner chat.Owner, limit int) ([]chat.Session, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, user_id, tenant_id, title, status, created_at, updated_at
-		FROM chat_sessions WHERE user_id = ? AND tenant_id = ? ORDER BY updated_at DESC, id DESC LIMIT ?`, owner.UserID, owner.TenantID, limit)
-	if err != nil {
+	var rows []chatSessionRow
+	if err := s.db.WithContext(ctx).Where("user_id=? AND tenant_id=?", owner.UserID, owner.TenantID).Order("updated_at DESC,id DESC").Limit(limit).Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var sessions []chat.Session
-	for rows.Next() {
-		var session chat.Session
-		if err := rows.Scan(&session.ID, &session.UserID, &session.TenantID, &session.Title, &session.Status, &session.CreatedAt, &session.UpdatedAt); err != nil {
-			return nil, err
-		}
-		sessions = append(sessions, session)
+	values := make([]chat.Session, 0, len(rows))
+	for _, r := range rows {
+		values = append(values, chat.Session{ID: r.ID, UserID: r.UserID, TenantID: r.TenantID, Title: r.Title, Status: r.Status, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt})
 	}
-	return sessions, rows.Err()
+	return values, nil
 }
 
 func (s *Store) GetSession(ctx context.Context, owner chat.Owner, id string) (chat.Session, error) {
-	var session chat.Session
-	err := s.db.QueryRowContext(ctx, `SELECT id, user_id, tenant_id, title, status, created_at, updated_at
-		FROM chat_sessions WHERE id = ? AND user_id = ? AND tenant_id = ?`, id, owner.UserID, owner.TenantID).
-		Scan(&session.ID, &session.UserID, &session.TenantID, &session.Title, &session.Status, &session.CreatedAt, &session.UpdatedAt)
-	if errors.Is(err, sql.ErrNoRows) {
+	var row chatSessionRow
+	err := s.db.WithContext(ctx).Where("id=? AND user_id=? AND tenant_id=?", id, owner.UserID, owner.TenantID).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return chat.Session{}, chat.ErrNotFound
 	}
-	return session, err
+	return chat.Session{ID: row.ID, UserID: row.UserID, TenantID: row.TenantID, Title: row.Title, Status: row.Status, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}, err
 }
 
 func (s *Store) ListMessages(ctx context.Context, owner chat.Owner, sessionID string, limit int) ([]chat.Message, error) {
 	if _, err := s.GetSession(ctx, owner, sessionID); err != nil {
 		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, session_id, COALESCE(run_id, ''), sequence, role, content, created_at
-		FROM (
-			SELECT id, session_id, run_id, sequence, role, content, created_at
-			FROM chat_messages WHERE session_id = ? ORDER BY sequence DESC LIMIT ?
-		) recent ORDER BY sequence ASC`, sessionID, limit)
+	var rows []chatMessageRow
+	err := s.db.WithContext(ctx).Raw(`SELECT id,session_id,run_id,sequence,role,content,created_at FROM (SELECT id,session_id,run_id,sequence,role,content,created_at FROM chat_messages WHERE session_id=? ORDER BY sequence DESC LIMIT ?) recent ORDER BY sequence ASC`, sessionID, limit).Scan(&rows).Error
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var messages []chat.Message
-	for rows.Next() {
-		var message chat.Message
-		if err := rows.Scan(&message.ID, &message.SessionID, &message.RunID, &message.Sequence, &message.Role, &message.Content, &message.CreatedAt); err != nil {
-			return nil, err
-		}
-		messages = append(messages, message)
+	values := make([]chat.Message, 0, len(rows))
+	for _, r := range rows {
+		values = append(values, chat.Message{ID: r.ID, SessionID: r.SessionID, RunID: stringValue(r.RunID), Sequence: r.Sequence, Role: r.Role, Content: r.Content, CreatedAt: r.CreatedAt})
 	}
-	return messages, rows.Err()
+	return values, nil
 }
 
-func (s *Store) CreateRun(ctx context.Context, input chat.CreateRunInput, run chat.Run, userMessage chat.Message, queued chat.Event) (chat.CreatedRun, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return chat.CreatedRun{}, err
-	}
-	defer tx.Rollback()
-	var sessionID string
-	if err := tx.QueryRowContext(ctx, `SELECT id FROM chat_sessions WHERE id = ? AND user_id = ? AND tenant_id = ? AND status = 'active' FOR UPDATE`, input.SessionID, input.Owner.UserID, input.Owner.TenantID).Scan(&sessionID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return chat.CreatedRun{}, chat.ErrNotFound
+func (s *Store) CreateRun(ctx context.Context, input chat.CreateRunInput, run chat.Run, userMessage chat.Message, queued chat.Event) (result chat.CreatedRun, err error) {
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var session chatSessionRow
+		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id=? AND user_id=? AND tenant_id=? AND status='active'", input.SessionID, input.Owner.UserID, input.Owner.TenantID).First(&session).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return chat.ErrNotFound
 		}
-		return chat.CreatedRun{}, err
-	}
-	existing, err := getRunByIdempotency(ctx, tx, input.SessionID, input.IdempotencyKey)
-	if err == nil {
-		if err := tx.Commit(); err != nil {
-			return chat.CreatedRun{}, err
+		if err != nil {
+			return err
 		}
-		return chat.CreatedRun{Run: existing, Created: false}, nil
-	}
-	if !errors.Is(err, chat.ErrNotFound) {
-		return chat.CreatedRun{}, err
-	}
-	var active int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM agent_runs WHERE session_id = ? AND status IN ('queued','running')`, input.SessionID).Scan(&active); err != nil {
-		return chat.CreatedRun{}, err
-	}
-	if active > 0 {
-		return chat.CreatedRun{}, chat.ErrActiveRun
-	}
-	var messageSequence int64
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence), 0) + 1 FROM chat_messages WHERE session_id = ?`, input.SessionID).Scan(&messageSequence); err != nil {
-		return chat.CreatedRun{}, err
-	}
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO agent_runs (id, session_id, status, model_name, idempotency_key, last_event_sequence, created_at)
-		VALUES (?, ?, 'queued', ?, ?, 1, ?)`,
-		run.ID, input.SessionID, run.Model, input.IdempotencyKey, run.CreatedAt); err != nil {
-		return chat.CreatedRun{}, err
-	}
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO chat_messages (id, session_id, run_id, sequence, role, content, created_at)
-		VALUES (?, ?, ?, ?, 'user', ?, ?)`,
-		userMessage.ID, input.SessionID, run.ID, messageSequence, userMessage.Content, userMessage.CreatedAt); err != nil {
-		return chat.CreatedRun{}, err
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE chat_sessions SET updated_at = ? WHERE id = ?`, userMessage.CreatedAt, input.SessionID); err != nil {
-		return chat.CreatedRun{}, err
-	}
-	queued.Sequence = 1
-	if err := insertEvent(ctx, tx, queued); err != nil {
-		return chat.CreatedRun{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return chat.CreatedRun{}, err
-	}
-	return chat.CreatedRun{Run: run, Created: true}, nil
+		existing, loadErr := getRunByIdempotency(tx, input.SessionID, input.IdempotencyKey)
+		if loadErr == nil {
+			result = chat.CreatedRun{Run: existing, Created: false}
+			return nil
+		}
+		if !errors.Is(loadErr, chat.ErrNotFound) {
+			return loadErr
+		}
+		var active int64
+		if err := tx.Model(&agentRunRow{}).Where("session_id=? AND status IN ?", input.SessionID, []string{"queued", "running"}).Count(&active).Error; err != nil {
+			return err
+		}
+		if active > 0 {
+			return chat.ErrActiveRun
+		}
+		sequence, err := nextMessageSequence(tx, input.SessionID)
+		if err != nil {
+			return err
+		}
+		if err := tx.Create(&agentRunRow{ID: run.ID, SessionID: input.SessionID, Status: string(chat.RunQueued), ModelName: run.Model, IdempotencyKey: input.IdempotencyKey, LastEventSequence: 1, CreatedAt: run.CreatedAt}).Error; err != nil {
+			return err
+		}
+		runID := run.ID
+		if err := tx.Create(&chatMessageRow{ID: userMessage.ID, SessionID: input.SessionID, RunID: &runID, Sequence: sequence, Role: "user", Content: userMessage.Content, CreatedAt: userMessage.CreatedAt}).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&chatSessionRow{}).Where("id=?", input.SessionID).Update("updated_at", userMessage.CreatedAt).Error; err != nil {
+			return err
+		}
+		queued.Sequence = 1
+		if err := insertEvent(tx, queued); err != nil {
+			return err
+		}
+		result = chat.CreatedRun{Run: run, Created: true}
+		return nil
+	})
+	return
 }
 
 func (s *Store) GetRun(ctx context.Context, owner chat.Owner, id string) (chat.Run, error) {
-	return scanRun(s.db.QueryRowContext(ctx, scopedRunSelect+` WHERE r.id = ? AND cs.user_id = ? AND cs.tenant_id = ?`, id, owner.UserID, owner.TenantID))
+	var row agentRunRow
+	result := s.db.WithContext(ctx).Table("agent_runs r").Select("r.*").Joins("JOIN chat_sessions cs ON cs.id=r.session_id").Where("r.id=? AND cs.user_id=? AND cs.tenant_id=?", id, owner.UserID, owner.TenantID).Scan(&row)
+	if result.Error != nil {
+		return chat.Run{}, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return chat.Run{}, chat.ErrNotFound
+	}
+	return chatRunFromRow(row), nil
 }
 
 func (s *Store) StartRun(ctx context.Context, runID string, event chat.Event) error {
-	return s.updateRunWithEvent(ctx, runID, chat.RunQueued, event, func(tx *sql.Tx, sequence int64) error {
-		_, err := tx.ExecContext(ctx, `UPDATE agent_runs SET status = 'running', started_at = ?, last_event_sequence = ? WHERE id = ?`, event.CreatedAt, sequence, runID)
-		return err
+	return s.updateRunWithEvent(ctx, runID, chat.RunQueued, event, func(tx *gorm.DB, seq int64) error {
+		return tx.Model(&agentRunRow{}).Where("id=?", runID).Updates(map[string]any{"status": "running", "started_at": event.CreatedAt, "last_event_sequence": seq}).Error
 	})
 }
 
-func (s *Store) AppendEvent(ctx context.Context, event chat.Event) (chat.Event, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return chat.Event{}, err
-	}
-	defer tx.Rollback()
-	sequence, status, err := lockRun(ctx, tx, event.RunID)
-	if err != nil {
-		return chat.Event{}, err
-	}
-	if status.Terminal() {
-		return chat.Event{}, chat.ErrInvalidState
-	}
-	event.Sequence = sequence + 1
-	if _, err := tx.ExecContext(ctx, `UPDATE agent_runs SET last_event_sequence = ? WHERE id = ?`, event.Sequence, event.RunID); err != nil {
-		return chat.Event{}, err
-	}
-	if err := insertEvent(ctx, tx, event); err != nil {
-		return chat.Event{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return chat.Event{}, err
-	}
-	return event, nil
+func (s *Store) AppendEvent(ctx context.Context, event chat.Event) (result chat.Event, err error) {
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		seq, status, err := lockRun(tx, event.RunID)
+		if err != nil {
+			return err
+		}
+		if status.Terminal() {
+			return chat.ErrInvalidState
+		}
+		event.Sequence = seq + 1
+		if err := tx.Model(&agentRunRow{}).Where("id=?", event.RunID).Update("last_event_sequence", event.Sequence).Error; err != nil {
+			return err
+		}
+		if err := insertEvent(tx, event); err != nil {
+			return err
+		}
+		result = event
+		return nil
+	})
+	return
 }
 
 func (s *Store) CompleteRun(ctx context.Context, runID string, assistant chat.Message, event chat.Event) error {
-	return s.updateRunWithEvent(ctx, runID, chat.RunRunning, event, func(tx *sql.Tx, sequence int64) error {
-		var messageSequence int64
-		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence), 0) + 1 FROM chat_messages WHERE session_id = ?`, assistant.SessionID).Scan(&messageSequence); err != nil {
+	return s.updateRunWithEvent(ctx, runID, chat.RunRunning, event, func(tx *gorm.DB, seq int64) error {
+		messageSeq, err := nextMessageSequence(tx, assistant.SessionID)
+		if err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO chat_messages (id, session_id, run_id, sequence, role, content, created_at)
-			VALUES (?, ?, ?, ?, 'assistant', ?, ?)`,
-			assistant.ID, assistant.SessionID, runID, messageSequence, assistant.Content, assistant.CreatedAt); err != nil {
+		rid := runID
+		if err := tx.Create(&chatMessageRow{ID: assistant.ID, SessionID: assistant.SessionID, RunID: &rid, Sequence: messageSeq, Role: "assistant", Content: assistant.Content, CreatedAt: assistant.CreatedAt}).Error; err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, `
-			UPDATE agent_runs SET status = 'completed', completed_at = ?, last_event_sequence = ? WHERE id = ?`,
-			event.CreatedAt, sequence, runID)
-		return err
+		return tx.Model(&agentRunRow{}).Where("id=?", runID).Updates(map[string]any{"status": "completed", "completed_at": event.CreatedAt, "last_event_sequence": seq}).Error
 	})
 }
 
 func (s *Store) FailRun(ctx context.Context, runID string, status chat.RunStatus, code, message string, event chat.Event) error {
-	return s.updateNonTerminalRunWithEvent(ctx, runID, event, func(tx *sql.Tx, sequence int64) error {
-		_, err := tx.ExecContext(ctx, `
-			UPDATE agent_runs SET status = ?, error_code = ?, error_message = ?, completed_at = ?, last_event_sequence = ? WHERE id = ?`,
-			status, code, message, event.CreatedAt, sequence, runID)
-		return err
+	return s.updateNonTerminalRunWithEvent(ctx, runID, event, func(tx *gorm.DB, seq int64) error {
+		return tx.Model(&agentRunRow{}).Where("id=?", runID).Updates(map[string]any{"status": status, "error_code": code, "error_message": message, "completed_at": event.CreatedAt, "last_event_sequence": seq}).Error
 	})
 }
 
@@ -246,9 +225,8 @@ func (s *Store) CancelRun(ctx context.Context, owner chat.Owner, runID string, e
 	if _, err := s.GetRun(ctx, owner, runID); err != nil {
 		return chat.Run{}, err
 	}
-	err := s.updateNonTerminalRunWithEvent(ctx, runID, event, func(tx *sql.Tx, sequence int64) error {
-		_, err := tx.ExecContext(ctx, `UPDATE agent_runs SET status = 'cancelled', completed_at = ?, last_event_sequence = ? WHERE id = ?`, event.CreatedAt, sequence, runID)
-		return err
+	err := s.updateNonTerminalRunWithEvent(ctx, runID, event, func(tx *gorm.DB, seq int64) error {
+		return tx.Model(&agentRunRow{}).Where("id=?", runID).Updates(map[string]any{"status": "cancelled", "completed_at": event.CreatedAt, "last_event_sequence": seq}).Error
 	})
 	if err != nil {
 		return chat.Run{}, err
@@ -260,162 +238,116 @@ func (s *Store) ListEvents(ctx context.Context, owner chat.Owner, runID string, 
 	if _, err := s.GetRun(ctx, owner, runID); err != nil {
 		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT run_id, sequence, event_type, event_data, created_at
-		FROM agent_run_events WHERE run_id = ? AND sequence > ? ORDER BY sequence ASC LIMIT ?`, runID, after, limit)
-	if err != nil {
+	var rows []agentRunEventRow
+	if err := s.db.WithContext(ctx).Where("run_id=? AND sequence>?", runID, after).Order("sequence ASC").Limit(limit).Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var events []chat.Event
-	for rows.Next() {
-		var event chat.Event
-		var raw []byte
-		if err := rows.Scan(&event.RunID, &event.Sequence, &event.Type, &raw, &event.CreatedAt); err != nil {
-			return nil, err
+	values := make([]chat.Event, 0, len(rows))
+	for _, r := range rows {
+		var data map[string]any
+		if err := json.Unmarshal(r.EventData, &data); err != nil {
+			return nil, fmt.Errorf("decode event %d: %w", r.Sequence, err)
 		}
-		if err := json.Unmarshal(raw, &event.Data); err != nil {
-			return nil, fmt.Errorf("decode event %d: %w", event.Sequence, err)
-		}
-		events = append(events, event)
+		values = append(values, chat.Event{RunID: r.RunID, Sequence: r.Sequence, Type: r.EventType, Data: data, CreatedAt: r.CreatedAt})
 	}
-	return events, rows.Err()
+	return values, nil
 }
 
 func (s *Store) InterruptRunning(ctx context.Context) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, `SELECT id, last_event_sequence FROM agent_runs WHERE status IN ('queued','running') FOR UPDATE`)
-	if err != nil {
-		return err
-	}
-	type interrupted struct {
-		id       string
-		sequence int64
-	}
-	var runs []interrupted
-	for rows.Next() {
-		var run interrupted
-		if err := rows.Scan(&run.id, &run.sequence); err != nil {
-			rows.Close()
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var rows []agentRunRow
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("id,last_event_sequence").Where("status IN ?", []string{"queued", "running"}).Find(&rows).Error; err != nil {
 			return err
 		}
-		runs = append(runs, run)
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	now := time.Now().UTC()
-	for _, run := range runs {
-		event := chat.Event{RunID: run.id, Sequence: run.sequence + 1, Type: "run.interrupted", Data: map[string]any{"status": chat.RunInterrupted}, CreatedAt: now}
-		if _, err := tx.ExecContext(ctx, `UPDATE agent_runs SET status = 'interrupted', completed_at = ?, last_event_sequence = ? WHERE id = ?`, now, event.Sequence, run.id); err != nil {
+		now := time.Now().UTC()
+		for _, r := range rows {
+			event := chat.Event{RunID: r.ID, Sequence: r.LastEventSequence + 1, Type: "run.interrupted", Data: map[string]any{"status": chat.RunInterrupted}, CreatedAt: now}
+			if err := tx.Model(&agentRunRow{}).Where("id=?", r.ID).Updates(map[string]any{"status": "interrupted", "completed_at": now, "last_event_sequence": event.Sequence}).Error; err != nil {
+				return err
+			}
+			if err := insertEvent(tx, event); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (s *Store) updateRunWithEvent(ctx context.Context, runID string, expected chat.RunStatus, event chat.Event, update func(*gorm.DB, int64) error) error {
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		last, status, err := lockRun(tx, runID)
+		if err != nil {
 			return err
 		}
-		if err := insertEvent(ctx, tx, event); err != nil {
+		if status != expected {
+			return chat.ErrInvalidState
+		}
+		event.Sequence = last + 1
+		if err := update(tx, event.Sequence); err != nil {
 			return err
 		}
-	}
-	return tx.Commit()
+		return insertEvent(tx, event)
+	})
 }
-
-func (s *Store) updateRunWithEvent(ctx context.Context, runID string, expected chat.RunStatus, event chat.Event, update func(*sql.Tx, int64) error) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	last, status, err := lockRun(ctx, tx, runID)
-	if err != nil {
-		return err
-	}
-	if status != expected {
-		return chat.ErrInvalidState
-	}
-	event.Sequence = last + 1
-	if err := update(tx, event.Sequence); err != nil {
-		return err
-	}
-	if err := insertEvent(ctx, tx, event); err != nil {
-		return err
-	}
-	return tx.Commit()
+func (s *Store) updateNonTerminalRunWithEvent(ctx context.Context, runID string, event chat.Event, update func(*gorm.DB, int64) error) error {
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		last, status, err := lockRun(tx, runID)
+		if err != nil {
+			return err
+		}
+		if status.Terminal() {
+			return chat.ErrInvalidState
+		}
+		event.Sequence = last + 1
+		if err := update(tx, event.Sequence); err != nil {
+			return err
+		}
+		return insertEvent(tx, event)
+	})
 }
-
-func (s *Store) updateNonTerminalRunWithEvent(ctx context.Context, runID string, event chat.Event, update func(*sql.Tx, int64) error) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	last, status, err := lockRun(ctx, tx, runID)
-	if err != nil {
-		return err
-	}
-	if status.Terminal() {
-		return chat.ErrInvalidState
-	}
-	event.Sequence = last + 1
-	if err := update(tx, event.Sequence); err != nil {
-		return err
-	}
-	if err := insertEvent(ctx, tx, event); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
-type rowScanner interface {
-	Scan(...any) error
-}
-
-const runSelect = `SELECT id, session_id, status, model_name, idempotency_key, COALESCE(error_code, ''), COALESCE(error_message, ''), created_at, started_at, completed_at FROM agent_runs`
-const scopedRunSelect = `SELECT r.id, r.session_id, r.status, r.model_name, r.idempotency_key, COALESCE(r.error_code, ''), COALESCE(r.error_message, ''), r.created_at, r.started_at, r.completed_at FROM agent_runs r JOIN chat_sessions cs ON cs.id = r.session_id`
 
 func (s *Store) getRun(ctx context.Context, id string) (chat.Run, error) {
-	return scanRun(s.db.QueryRowContext(ctx, runSelect+` WHERE id = ?`, id))
-}
-
-func scanRun(row rowScanner) (chat.Run, error) {
-	var run chat.Run
-	var started, completed sql.NullTime
-	if err := row.Scan(&run.ID, &run.SessionID, &run.Status, &run.Model, &run.IdempotencyKey, &run.ErrorCode, &run.ErrorMessage, &run.CreatedAt, &started, &completed); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return chat.Run{}, chat.ErrNotFound
-		}
-		return chat.Run{}, err
+	var row agentRunRow
+	err := s.db.WithContext(ctx).Where("id=?", id).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return chat.Run{}, chat.ErrNotFound
 	}
-	if started.Valid {
-		run.StartedAt = &started.Time
-	}
-	if completed.Valid {
-		run.CompletedAt = &completed.Time
-	}
-	return run, nil
+	return chatRunFromRow(row), err
 }
-
-func getRunByIdempotency(ctx context.Context, tx *sql.Tx, sessionID, key string) (chat.Run, error) {
-	return scanRun(tx.QueryRowContext(ctx, runSelect+` WHERE session_id = ? AND idempotency_key = ?`, sessionID, key))
+func getRunByIdempotency(tx *gorm.DB, sessionID, key string) (chat.Run, error) {
+	var row agentRunRow
+	err := tx.Where("session_id=? AND idempotency_key=?", sessionID, key).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return chat.Run{}, chat.ErrNotFound
+	}
+	return chatRunFromRow(row), err
 }
-
-func lockRun(ctx context.Context, tx *sql.Tx, runID string) (int64, chat.RunStatus, error) {
-	var sequence int64
-	var status chat.RunStatus
-	err := tx.QueryRowContext(ctx, `SELECT last_event_sequence, status FROM agent_runs WHERE id = ? FOR UPDATE`, runID).Scan(&sequence, &status)
-	if errors.Is(err, sql.ErrNoRows) {
+func lockRun(tx *gorm.DB, runID string) (int64, chat.RunStatus, error) {
+	var row agentRunRow
+	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("last_event_sequence,status").Where("id=?", runID).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return 0, "", chat.ErrNotFound
 	}
-	return sequence, status, err
+	return row.LastEventSequence, chat.RunStatus(row.Status), err
 }
-
-func insertEvent(ctx context.Context, tx *sql.Tx, event chat.Event) error {
+func insertEvent(tx *gorm.DB, event chat.Event) error {
 	raw, err := json.Marshal(event.Data)
 	if err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO agent_run_events (run_id, sequence, event_type, event_data, created_at) VALUES (?, ?, ?, ?, ?)`,
-		event.RunID, event.Sequence, event.Type, raw, event.CreatedAt)
-	return err
+	return tx.Create(&agentRunEventRow{RunID: event.RunID, Sequence: event.Sequence, EventType: event.Type, EventData: raw, CreatedAt: event.CreatedAt}).Error
+}
+func nextMessageSequence(tx *gorm.DB, sessionID string) (int64, error) {
+	var seq int64
+	err := tx.Model(&chatMessageRow{}).Select("COALESCE(MAX(sequence),0)+1").Where("session_id=?", sessionID).Scan(&seq).Error
+	return seq, err
+}
+func chatRunFromRow(r agentRunRow) chat.Run {
+	return chat.Run{ID: r.ID, SessionID: r.SessionID, Status: chat.RunStatus(r.Status), Model: r.ModelName, IdempotencyKey: r.IdempotencyKey, ErrorCode: stringValue(r.ErrorCode), ErrorMessage: stringValue(r.ErrorMessage), CreatedAt: r.CreatedAt, StartedAt: r.StartedAt, CompletedAt: r.CompletedAt}
+}
+func stringValue(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return *v
 }

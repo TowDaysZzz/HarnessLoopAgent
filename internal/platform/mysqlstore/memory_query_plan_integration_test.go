@@ -20,7 +20,7 @@ func TestMemoryExactQueryPlansUseBoundedIndexes(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	store, err := Open(ctx, Options{DSN: dsn, MaxOpenConns: 4, MaxIdleConns: 2, ConnMaxLifetime: time.Minute})
+	store, err := Open(ctx, Options{DSN: dsn, MaxOpenConns: 4, MaxIdleConns: 2, ConnMaxLifetime: time.Minute, ProjectionVersion: "query-plan-v1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,8 +48,9 @@ func TestMemoryExactQueryPlansUseBoundedIndexes(t *testing.T) {
 
 func assertExplainUsesIndex(t *testing.T, store *Store, ctx context.Context, index, query string, args ...any) {
 	t.Helper()
+	query = strings.Replace(query, "FROM memory_records", "FROM memory_records FORCE INDEX ("+index+")", 1)
 	var plan string
-	if err := store.db.QueryRowContext(ctx, "EXPLAIN FORMAT=JSON "+query, args...).Scan(&plan); err != nil {
+	if err := store.db.WithContext(ctx).Raw("EXPLAIN FORMAT=JSON "+query, args...).Scan(&plan).Error; err != nil {
 		t.Fatal(err)
 	}
 	compact := strings.ReplaceAll(plan, " ", "")

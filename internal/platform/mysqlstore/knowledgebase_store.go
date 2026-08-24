@@ -2,27 +2,23 @@ package mysqlstore
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/knowledgebase"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 func (s *Store) GetKnowledgeBaseBinding(ctx context.Context, userID, tenantID uint64) (knowledgebase.Binding, error) {
-	var value knowledgebase.Binding
-	err := s.db.QueryRowContext(ctx, `SELECT user_id,tenant_id,rag_kb_id,name,status,created_at,updated_at
-		FROM agent_user_knowledge_bases WHERE user_id=? AND tenant_id=?`, userID, tenantID).Scan(
-		&value.UserID, &value.TenantID, &value.RAGKBID, &value.Name, &value.Status, &value.CreatedAt, &value.UpdatedAt)
-	if errors.Is(err, sql.ErrNoRows) {
+	var row knowledgeBaseRow
+	err := s.db.WithContext(ctx).Where("user_id=? AND tenant_id=?", userID, tenantID).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return knowledgebase.Binding{}, knowledgebase.ErrNotConfigured
 	}
-	return value, err
+	return knowledgebase.Binding{UserID: row.UserID, TenantID: row.TenantID, RAGKBID: row.RAGKBID, Name: row.Name, Status: row.Status, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}, err
 }
 
 func (s *Store) UpsertKnowledgeBaseBinding(ctx context.Context, value knowledgebase.Binding) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO agent_user_knowledge_bases
-		(user_id,tenant_id,rag_kb_id,name,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)
-		ON DUPLICATE KEY UPDATE rag_kb_id=VALUES(rag_kb_id),name=VALUES(name),status=VALUES(status),updated_at=VALUES(updated_at)`,
-		value.UserID, value.TenantID, value.RAGKBID, value.Name, value.Status, value.CreatedAt, value.UpdatedAt)
-	return err
+	row := knowledgeBaseRow{UserID: value.UserID, TenantID: value.TenantID, RAGKBID: value.RAGKBID, Name: value.Name, Status: value.Status, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt}
+	return s.db.WithContext(ctx).Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "tenant_id"}, {Name: "user_id"}}, DoUpdates: clause.AssignmentColumns([]string{"rag_kb_id", "name", "status", "updated_at"})}).Create(&row).Error
 }

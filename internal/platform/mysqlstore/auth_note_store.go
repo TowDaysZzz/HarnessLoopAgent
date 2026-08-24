@@ -2,7 +2,6 @@ package mysqlstore
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,270 +9,240 @@ import (
 
 	agentauth "github.com/TowDaysZzz/HarnessLoopAgent/internal/auth"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/note"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
-func (s *Store) CreateAuthSession(ctx context.Context, session agentauth.Session) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO agent_user_sessions
-		(id,user_id,tenant_id,role,email,name,access_token_ciphertext,refresh_token_ciphertext,access_expires_at,expires_at,created_at,updated_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`, session.ID, session.UserID, session.TenantID, session.Role, session.Email, session.Name,
-		session.EncryptedAccessToken, session.EncryptedRefreshToken, session.AccessExpiresAt, session.ExpiresAt, session.CreatedAt, session.UpdatedAt)
-	return err
+func (s *Store) CreateAuthSession(ctx context.Context, value agentauth.Session) error {
+	return s.db.WithContext(ctx).Create(&authSessionRow{ID: value.ID, UserID: value.UserID, TenantID: value.TenantID, Role: value.Role, Email: value.Email, Name: value.Name, AccessTokenCiphertext: value.EncryptedAccessToken, RefreshTokenCiphertext: value.EncryptedRefreshToken, AccessExpiresAt: value.AccessExpiresAt, ExpiresAt: value.ExpiresAt, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt}).Error
 }
 
 func (s *Store) GetAuthSession(ctx context.Context, id string) (agentauth.Session, error) {
-	var session agentauth.Session
-	err := s.db.QueryRowContext(ctx, `SELECT id,user_id,tenant_id,role,email,name,access_token_ciphertext,refresh_token_ciphertext,
-		access_expires_at,expires_at,created_at,updated_at FROM agent_user_sessions WHERE id=?`, id).Scan(
-		&session.ID, &session.UserID, &session.TenantID, &session.Role, &session.Email, &session.Name,
-		&session.EncryptedAccessToken, &session.EncryptedRefreshToken, &session.AccessExpiresAt, &session.ExpiresAt, &session.CreatedAt, &session.UpdatedAt)
-	if errors.Is(err, sql.ErrNoRows) {
+	var row authSessionRow
+	err := s.db.WithContext(ctx).Where("id=?", id).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return agentauth.Session{}, agentauth.ErrUnauthenticated
 	}
-	return session, err
+	return agentauth.Session{ID: row.ID, UserID: row.UserID, TenantID: row.TenantID, Role: row.Role, Email: row.Email, Name: row.Name, EncryptedAccessToken: row.AccessTokenCiphertext, EncryptedRefreshToken: row.RefreshTokenCiphertext, AccessExpiresAt: row.AccessExpiresAt, ExpiresAt: row.ExpiresAt, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}, err
 }
 
-func (s *Store) UpdateAuthSessionTokens(ctx context.Context, session agentauth.Session) error {
-	result, err := s.db.ExecContext(ctx, `UPDATE agent_user_sessions SET role=?,access_token_ciphertext=?,refresh_token_ciphertext=?,
-		access_expires_at=?,updated_at=? WHERE id=?`, session.Role, session.EncryptedAccessToken, session.EncryptedRefreshToken,
-		session.AccessExpiresAt, session.UpdatedAt, session.ID)
-	if err != nil {
-		return err
+func (s *Store) UpdateAuthSessionTokens(ctx context.Context, value agentauth.Session) error {
+	result := s.db.WithContext(ctx).Model(&authSessionRow{}).Where("id=?", value.ID).Updates(map[string]any{"role": value.Role, "access_token_ciphertext": value.EncryptedAccessToken, "refresh_token_ciphertext": value.EncryptedRefreshToken, "access_expires_at": value.AccessExpiresAt, "updated_at": value.UpdatedAt})
+	if result.Error != nil {
+		return result.Error
 	}
-	return requireAffected(result, agentauth.ErrUnauthenticated)
+	if result.RowsAffected != 1 {
+		return agentauth.ErrUnauthenticated
+	}
+	return nil
 }
 
 func (s *Store) DeleteAuthSession(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM agent_user_sessions WHERE id=?`, id)
-	return err
+	return s.db.WithContext(ctx).Where("id=?", id).Delete(&authSessionRow{}).Error
 }
 
-func (s *Store) CreateNoteWithOutbox(ctx context.Context, value note.Note, idempotencyKey string, event note.OutboxEvent) (note.Note, bool, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return note.Note{}, false, err
-	}
-	defer tx.Rollback()
-	if existing, err := getNoteByCreateKey(ctx, tx, value.UserID, value.TenantID, idempotencyKey); err == nil {
-		if existing.ContentHash != value.ContentHash || existing.Title != value.Title || existing.Content != value.Content {
-			return note.Note{}, false, note.ErrConflict
+func (s *Store) CreateNoteWithOutbox(ctx context.Context, value note.Note, idempotencyKey string, event note.OutboxEvent) (result note.Note, replayed bool, err error) {
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		existing, loadErr := getNoteByCreateKey(tx, value.UserID, value.TenantID, idempotencyKey)
+		if loadErr == nil {
+			if existing.ContentHash != value.ContentHash || existing.Title != value.Title || existing.Content != value.Content {
+				return note.ErrConflict
+			}
+			result, replayed = existing, true
+			return nil
 		}
-		return existing, true, tx.Commit()
-	} else if !errors.Is(err, note.ErrNotFound) {
-		return note.Note{}, false, err
-	}
-	tags, err := json.Marshal(value.Tags)
-	if err != nil {
-		return note.Note{}, false, err
-	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO notes
-		(id,user_id,tenant_id,external_note_id,create_idempotency_key,title,content,tags,occurred_at,status,rag_kb_id,rag_status,content_hash,created_at,updated_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, value.ID, value.UserID, value.TenantID, value.ExternalNoteID, idempotencyKey,
-		value.Title, value.Content, tags, value.OccurredAt, value.Status, value.RAGKBID, value.RAGStatus, value.ContentHash, value.CreatedAt, value.UpdatedAt)
-	if err != nil {
-		return note.Note{}, false, err
-	}
-	if err := insertNoteOutbox(ctx, tx, event, idempotencyKey); err != nil {
-		return note.Note{}, false, err
-	}
-	return value, false, tx.Commit()
+		if !errors.Is(loadErr, note.ErrNotFound) {
+			return loadErr
+		}
+		row, convertErr := noteToRow(value, idempotencyKey)
+		if convertErr != nil {
+			return convertErr
+		}
+		if err := tx.Create(&row).Error; err != nil {
+			return err
+		}
+		if err := insertNoteOutbox(tx, event, idempotencyKey); err != nil {
+			return err
+		}
+		result = value
+		return nil
+	})
+	return
 }
 
 func (s *Store) GetNote(ctx context.Context, userID, tenantID uint64, id string) (note.Note, error) {
-	return scanNote(s.db.QueryRowContext(ctx, noteSelect+` WHERE user_id=? AND tenant_id=? AND id=?`, userID, tenantID, id))
+	var row noteRow
+	err := s.db.WithContext(ctx).Where("user_id=? AND tenant_id=? AND id=?", userID, tenantID, id).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return note.Note{}, note.ErrNotFound
+	}
+	if err != nil {
+		return note.Note{}, err
+	}
+	return noteFromRow(row)
 }
 
 func (s *Store) ListNotes(ctx context.Context, userID, tenantID uint64, limit int, cursor string) ([]note.Note, error) {
-	query := noteSelect + ` WHERE user_id=? AND tenant_id=? AND status<>'deleted'`
-	args := []any{userID, tenantID}
+	query := s.db.WithContext(ctx).Where("user_id=? AND tenant_id=? AND status<>'deleted'", userID, tenantID)
 	if cursor != "" {
-		query += ` AND id<?`
-		args = append(args, cursor)
+		query = query.Where("id<?", cursor)
 	}
-	query += ` ORDER BY created_at DESC,id DESC LIMIT ?`
-	args = append(args, limit)
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
+	var rows []noteRow
+	if err := query.Order("created_at DESC,id DESC").Limit(limit).Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var result []note.Note
-	for rows.Next() {
-		value, err := scanNote(rows)
+	result := make([]note.Note, 0, len(rows))
+	for _, row := range rows {
+		value, err := noteFromRow(row)
 		if err != nil {
 			return nil, err
 		}
 		result = append(result, value)
 	}
-	return result, rows.Err()
+	return result, nil
 }
 
-func (s *Store) QueueNoteDelete(ctx context.Context, userID, tenantID uint64, noteID, key string, event note.OutboxEvent) (note.Note, bool, error) {
+func (s *Store) QueueNoteDelete(ctx context.Context, userID, tenantID uint64, noteID, key string, event note.OutboxEvent) (result note.Note, replayed bool, err error) {
 	if key == "" {
 		return note.Note{}, false, note.ErrInvalidInput
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return note.Note{}, false, err
-	}
-	defer tx.Rollback()
-	value, err := scanNote(tx.QueryRowContext(ctx, noteSelect+` WHERE user_id=? AND tenant_id=? AND id=? FOR UPDATE`, userID, tenantID, noteID))
-	if err != nil {
-		return note.Note{}, false, err
-	}
-	var existing string
-	if err := tx.QueryRowContext(ctx, `SELECT id FROM note_outbox_events WHERE tenant_id=? AND user_id=? AND event_type=? AND idempotency_key=?`, tenantID, userID, "note.delete", key).Scan(&existing); err == nil {
-		return value, true, tx.Commit()
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		return note.Note{}, false, err
-	}
-	if value.Status == note.StatusDeleted {
-		return value, true, tx.Commit()
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE notes SET status='delete_pending',last_error='',updated_at=? WHERE id=?`, event.CreatedAt, noteID); err != nil {
-		return note.Note{}, false, err
-	}
-	if err := insertNoteOutbox(ctx, tx, event, key); err != nil {
-		return note.Note{}, false, err
-	}
-	value.Status = note.StatusDeletePending
-	value.UpdatedAt = event.CreatedAt
-	return value, false, tx.Commit()
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var row noteRow
+		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("user_id=? AND tenant_id=? AND id=?", userID, tenantID, noteID).First(&row).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return note.ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		result, err = noteFromRow(row)
+		if err != nil {
+			return err
+		}
+		var count int64
+		if err := tx.Model(&noteOutboxRow{}).Where("tenant_id=? AND user_id=? AND event_type=? AND idempotency_key=?", tenantID, userID, "note.delete", key).Count(&count).Error; err != nil {
+			return err
+		}
+		if count != 0 || result.Status == note.StatusDeleted {
+			replayed = true
+			return nil
+		}
+		if err := tx.Model(&noteRow{}).Where("id=? AND user_id=? AND tenant_id=?", noteID, userID, tenantID).Updates(map[string]any{"status": "delete_pending", "last_error": "", "updated_at": event.CreatedAt}).Error; err != nil {
+			return err
+		}
+		if err := insertNoteOutbox(tx, event, key); err != nil {
+			return err
+		}
+		result.Status, result.UpdatedAt = note.StatusDeletePending, event.CreatedAt
+		return nil
+	})
+	return
 }
 
-func (s *Store) ClaimNoteOutbox(ctx context.Context, userID, tenantID uint64, limit int) ([]note.OutboxEvent, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, `SELECT id,note_id,user_id,tenant_id,event_type,attempt,created_at,available_at
-		FROM note_outbox_events WHERE user_id=? AND tenant_id=? AND status IN ('pending','failed') AND available_at<=?
-		ORDER BY created_at LIMIT ? FOR UPDATE SKIP LOCKED`, userID, tenantID, time.Now().UTC(), limit)
-	if err != nil {
-		return nil, err
-	}
-	var events []note.OutboxEvent
-	for rows.Next() {
-		var event note.OutboxEvent
-		if err := rows.Scan(&event.ID, &event.NoteID, &event.UserID, &event.TenantID, &event.EventType, &event.Attempt, &event.CreatedAt, &event.AvailableAt); err != nil {
-			rows.Close()
-			return nil, err
+func (s *Store) ClaimNoteOutbox(ctx context.Context, userID, tenantID uint64, limit int) (events []note.OutboxEvent, err error) {
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var rows []noteOutboxRow
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).Where("user_id=? AND tenant_id=? AND status IN ? AND available_at<=?", userID, tenantID, []string{"pending", "failed"}, time.Now().UTC()).Order("created_at").Limit(limit).Find(&rows).Error; err != nil {
+			return err
 		}
-		events = append(events, event)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	for i := range events {
-		events[i].Attempt++
-		if _, err := tx.ExecContext(ctx, `UPDATE note_outbox_events SET status='processing',attempt=? WHERE id=?`, events[i].Attempt, events[i].ID); err != nil {
-			return nil, err
+		for _, row := range rows {
+			attempt := row.Attempt + 1
+			result := tx.Model(&noteOutboxRow{}).Where("id=? AND status IN ?", row.ID, []string{"pending", "failed"}).Updates(map[string]any{"status": "processing", "attempt": attempt})
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				return note.ErrConflict
+			}
+			events = append(events, note.OutboxEvent{ID: row.ID, NoteID: row.NoteID, UserID: row.UserID, TenantID: row.TenantID, EventType: row.EventType, Attempt: attempt, CreatedAt: row.CreatedAt, AvailableAt: row.AvailableAt})
 		}
-	}
-	return events, tx.Commit()
+		return nil
+	})
+	return
 }
 
 func (s *Store) CompleteNoteCreate(ctx context.Context, event note.OutboxEvent, documentID, jobID uint64, ragStatus string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
 	status := note.StatusIndexing
 	if ragStatus == "completed" {
 		status = note.StatusIndexed
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE notes SET status=?,rag_document_id=?,rag_job_id=?,rag_status=?,last_error='',updated_at=? WHERE id=? AND user_id=? AND tenant_id=?`,
-		status, documentID, jobID, ragStatus, time.Now().UTC(), event.NoteID, event.UserID, event.TenantID); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE note_outbox_events SET status='completed',processed_at=?,last_error='' WHERE id=?`, time.Now().UTC(), event.ID); err != nil {
-		return err
-	}
-	return tx.Commit()
+	now := time.Now().UTC()
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&noteRow{}).Where("id=? AND user_id=? AND tenant_id=?", event.NoteID, event.UserID, event.TenantID).Updates(map[string]any{"status": status, "rag_document_id": documentID, "rag_job_id": jobID, "rag_status": ragStatus, "last_error": "", "updated_at": now}).Error; err != nil {
+			return err
+		}
+		return tx.Model(&noteOutboxRow{}).Where("id=?", event.ID).Updates(map[string]any{"status": "completed", "processed_at": now, "last_error": ""}).Error
+	})
 }
 
 func (s *Store) UpdateNoteJobStatus(ctx context.Context, userID, tenantID uint64, noteID, status, ragStatus, lastError string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE notes SET status=?,rag_status=?,last_error=?,updated_at=? WHERE id=? AND user_id=? AND tenant_id=?`,
-		status, ragStatus, lastError, time.Now().UTC(), noteID, userID, tenantID)
-	return err
+	return s.db.WithContext(ctx).Model(&noteRow{}).Where("id=? AND user_id=? AND tenant_id=?", noteID, userID, tenantID).Updates(map[string]any{"status": status, "rag_status": ragStatus, "last_error": lastError, "updated_at": time.Now().UTC()}).Error
 }
 
 func (s *Store) CompleteNoteDelete(ctx context.Context, event note.OutboxEvent) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
 	now := time.Now().UTC()
-	if _, err := tx.ExecContext(ctx, `UPDATE notes SET status='deleted',rag_status='deleted',last_error='',deleted_at=?,updated_at=? WHERE id=? AND user_id=? AND tenant_id=?`, now, now, event.NoteID, event.UserID, event.TenantID); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE note_outbox_events SET status='completed',processed_at=?,last_error='' WHERE id=?`, now, event.ID); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&noteRow{}).Where("id=? AND user_id=? AND tenant_id=?", event.NoteID, event.UserID, event.TenantID).Updates(map[string]any{"status": "deleted", "rag_status": "deleted", "last_error": "", "deleted_at": now, "updated_at": now}).Error; err != nil {
+			return err
+		}
+		return tx.Model(&noteOutboxRow{}).Where("id=?", event.ID).Updates(map[string]any{"status": "completed", "processed_at": now, "last_error": ""}).Error
+	})
 }
 
 func (s *Store) FailNoteProjection(ctx context.Context, event note.OutboxEvent, message string, retryAt time.Time) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
 	status := note.StatusIndexFailed
 	if event.EventType == "note.delete" {
 		status = note.StatusDeletePending
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE notes SET status=?,last_error=?,updated_at=? WHERE id=? AND user_id=? AND tenant_id=?`, status, message, time.Now().UTC(), event.NoteID, event.UserID, event.TenantID); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE note_outbox_events SET status='failed',last_error=?,available_at=? WHERE id=?`, message, retryAt, event.ID); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&noteRow{}).Where("id=? AND user_id=? AND tenant_id=?", event.NoteID, event.UserID, event.TenantID).Updates(map[string]any{"status": status, "last_error": message, "updated_at": time.Now().UTC()}).Error; err != nil {
+			return err
+		}
+		return tx.Model(&noteOutboxRow{}).Where("id=?", event.ID).Updates(map[string]any{"status": "failed", "last_error": message, "available_at": retryAt}).Error
+	})
 }
 
-const noteSelect = `SELECT id,user_id,tenant_id,external_note_id,title,content,tags,occurred_at,status,rag_kb_id,
-	COALESCE(rag_document_id,0),COALESCE(rag_job_id,0),rag_status,last_error,content_hash,deleted_at,created_at,updated_at FROM notes`
-
-type scanner interface{ Scan(...any) error }
-
-func scanNote(row scanner) (note.Note, error) {
-	var value note.Note
-	var tags []byte
-	if err := row.Scan(&value.ID, &value.UserID, &value.TenantID, &value.ExternalNoteID, &value.Title, &value.Content, &tags,
-		&value.OccurredAt, &value.Status, &value.RAGKBID, &value.RAGDocumentID, &value.RAGJobID, &value.RAGStatus, &value.LastError,
-		&value.ContentHash, &value.DeletedAt, &value.CreatedAt, &value.UpdatedAt); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return note.Note{}, note.ErrNotFound
-		}
-		return note.Note{}, err
+func noteToRow(value note.Note, key string) (noteRow, error) {
+	tags, err := json.Marshal(value.Tags)
+	if err != nil {
+		return noteRow{}, err
 	}
-	if err := json.Unmarshal(tags, &value.Tags); err != nil {
+	return noteRow{ID: value.ID, UserID: value.UserID, TenantID: value.TenantID, ExternalNoteID: value.ExternalNoteID, CreateIdempotencyKey: key, Title: value.Title, Content: value.Content, Tags: tags, OccurredAt: value.OccurredAt, Status: string(value.Status), RAGKBID: value.RAGKBID, RAGDocumentID: uintPtr(value.RAGDocumentID), RAGJobID: uintPtr(value.RAGJobID), RAGStatus: value.RAGStatus, LastError: value.LastError, ContentHash: value.ContentHash, DeletedAt: value.DeletedAt, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt}, nil
+}
+
+func noteFromRow(row noteRow) (note.Note, error) {
+	var tags []string
+	if err := json.Unmarshal(row.Tags, &tags); err != nil {
 		return note.Note{}, fmt.Errorf("decode note tags: %w", err)
 	}
-	return value, nil
+	return note.Note{ID: row.ID, UserID: row.UserID, TenantID: row.TenantID, ExternalNoteID: row.ExternalNoteID, Title: row.Title, Content: row.Content, Tags: tags, OccurredAt: row.OccurredAt, Status: note.Status(row.Status), RAGKBID: row.RAGKBID, RAGDocumentID: uintValue(row.RAGDocumentID), RAGJobID: uintValue(row.RAGJobID), RAGStatus: row.RAGStatus, LastError: row.LastError, ContentHash: row.ContentHash, DeletedAt: row.DeletedAt, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}, nil
 }
 
-func getNoteByCreateKey(ctx context.Context, tx *sql.Tx, userID, tenantID uint64, key string) (note.Note, error) {
-	return scanNote(tx.QueryRowContext(ctx, noteSelect+` WHERE user_id=? AND tenant_id=? AND create_idempotency_key=?`, userID, tenantID, key))
-}
-
-func insertNoteOutbox(ctx context.Context, tx *sql.Tx, event note.OutboxEvent, key string) error {
-	_, err := tx.ExecContext(ctx, `INSERT INTO note_outbox_events
-		(id,note_id,user_id,tenant_id,event_type,idempotency_key,status,attempt,available_at,created_at)
-		VALUES (?,?,?,?,?,?,'pending',0,?,?)`, event.ID, event.NoteID, event.UserID, event.TenantID, event.EventType, key, event.AvailableAt, event.CreatedAt)
-	return err
-}
-
-func requireAffected(result sql.Result, notFound error) error {
-	count, err := result.RowsAffected()
+func getNoteByCreateKey(tx *gorm.DB, userID, tenantID uint64, key string) (note.Note, error) {
+	var row noteRow
+	err := tx.Where("user_id=? AND tenant_id=? AND create_idempotency_key=?", userID, tenantID, key).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return note.Note{}, note.ErrNotFound
+	}
 	if err != nil {
-		return err
+		return note.Note{}, err
 	}
-	if count == 0 {
-		return notFound
+	return noteFromRow(row)
+}
+
+func insertNoteOutbox(tx *gorm.DB, event note.OutboxEvent, key string) error {
+	return tx.Create(&noteOutboxRow{ID: event.ID, NoteID: event.NoteID, UserID: event.UserID, TenantID: event.TenantID, EventType: event.EventType, IdempotencyKey: key, Status: "pending", Attempt: 0, AvailableAt: event.AvailableAt, CreatedAt: event.CreatedAt}).Error
+}
+
+func uintPtr(value uint64) *uint64 {
+	if value == 0 {
+		return nil
 	}
-	return nil
+	return &value
+}
+func uintValue(value *uint64) uint64 {
+	if value == nil {
+		return 0
+	}
+	return *value
 }

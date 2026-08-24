@@ -11,6 +11,9 @@ import (
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/memoryworkflow"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/platform/mysqlstore"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/workflow"
+	"gorm.io/driver/mysql"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 type mysqlE2EExtractor struct{}
@@ -65,7 +68,7 @@ func TestMySQLOnlyMemoryCaptureRestartRecallCorrectionEditAndDeferredOutbox(t *t
 	}
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	owner := workflow.WorkflowOwner{TenantID: uint64(now.UnixNano()%900000000) + 1000000000, OwnerID: uint64(now.UnixNano()%800000000) + 2000000000}
-	beforeBacklog, err := store.PendingProjectionCount(ctx)
+	beforeBacklog, err := projectionCountForOwner(ctx, dsn, owner)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,9 +84,9 @@ func TestMySQLOnlyMemoryCaptureRestartRecallCorrectionEditAndDeferredOutbox(t *t
 	oldID := first.Committed.ID
 	assertMySQLRecall(t, ctx, store, memory.Owner{TenantID: owner.TenantID, UserID: owner.OwnerID}, now, oldID, "我喜欢茶")
 
-	duplicateBacklog, _ := store.PendingProjectionCount(ctx)
+	duplicateBacklog, _ := projectionCountForOwner(ctx, dsn, owner)
 	duplicate, err := restarted.Start(ctx, memoryworkflow.StartCaptureInput{Owner: owner, Query: "请记住我喜欢茶", IdempotencyKey: "mysql-duplicate", Intent: memory.IntentUserStatement})
-	afterDuplicateBacklog, _ := store.PendingProjectionCount(ctx)
+	afterDuplicateBacklog, _ := projectionCountForOwner(ctx, dsn, owner)
 	if err != nil || duplicate.Status != string(workflow.RunCompleted) || duplicate.Committed == nil || duplicate.Committed.ID != oldID || duplicate.Review != nil || afterDuplicateBacklog != duplicateBacklog {
 		t.Fatalf("duplicate=%+v backlog=%d->%d err=%v", duplicate, duplicateBacklog, afterDuplicateBacklog, err)
 	}
@@ -111,10 +114,25 @@ func TestMySQLOnlyMemoryCaptureRestartRecallCorrectionEditAndDeferredOutbox(t *t
 	if err != nil || len(versions) != 4 || versions[0].Status != memory.StatusSuperseded || versions[0].SupersededBy != coffeeID || versions[1].Status != memory.StatusSuperseded || versions[1].SupersededBy != final.Committed.ID || versions[2].Status != memory.StatusRejected || versions[3].Status != memory.StatusActive {
 		t.Fatalf("versions=%+v err=%v", versions, err)
 	}
-	afterBacklog, err := store.PendingProjectionCount(ctx)
+	afterBacklog, err := projectionCountForOwner(ctx, dsn, owner)
 	if err != nil || afterBacklog-beforeBacklog != 3 {
 		t.Fatalf("deferred outbox backlog=%d->%d err=%v", beforeBacklog, afterBacklog, err)
 	}
+}
+
+func projectionCountForOwner(ctx context.Context, dsn string, owner workflow.WorkflowOwner) (int, error) {
+	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{SkipDefaultTransaction: true, Logger: logger.Default.LogMode(logger.Silent)})
+	if err != nil {
+		return 0, err
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		return 0, err
+	}
+	defer sqlDB.Close()
+	var count int
+	err = db.WithContext(ctx).Raw(`SELECT COUNT(*) FROM memory_projection_outbox WHERE tenant_id=? AND user_id=?`, owner.TenantID, owner.OwnerID).Scan(&count).Error
+	return count, err
 }
 
 func newMySQLCaptureService(t *testing.T, store *mysqlstore.Store, now time.Time) *memoryworkflow.CaptureService {

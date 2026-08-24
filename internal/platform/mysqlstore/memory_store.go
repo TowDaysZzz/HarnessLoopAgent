@@ -3,7 +3,6 @@ package mysqlstore
 import (
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -11,42 +10,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/memory"
+	mysqlDriver "github.com/go-sql-driver/mysql"
+	"github.com/google/uuid"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
-
-const memoryColumns = `id,tenant_id,user_id,layer,kind,scope_type,scope_id,namespace,slot_key,entity_type,entity_id,lineage_id,lineage_version,row_version,canonical_text,structured_value,content_hash,authority,confidence,salience,source_type,source_id,evidence_id,status,supersedes_id,superseded_by,expires_at,created_at,updated_at`
-
-func scanMemory(row rowScanner) (memory.Record, error) {
-	var value memory.Record
-	var raw []byte
-	var supersedes, supersededBy sql.NullString
-	var expires sql.NullTime
-	err := row.Scan(&value.ID, &value.Owner.TenantID, &value.Owner.UserID, &value.Layer, &value.Kind, &value.Scope.Type, &value.Scope.ID,
-		&value.Namespace, &value.SlotKey, &value.Entity.Type, &value.Entity.ID, &value.LineageID, &value.LineageVersion, &value.RowVersion,
-		&value.CanonicalText, &raw, &value.ContentHash, &value.Authority, &value.Confidence, &value.Salience, &value.Source.Type,
-		&value.Source.ID, &value.Source.EvidenceID, &value.Status, &supersedes, &supersededBy, &expires, &value.CreatedAt, &value.UpdatedAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return memory.Record{}, memory.ErrNotFound
-	}
-	if err != nil {
-		return memory.Record{}, err
-	}
-	if err := json.Unmarshal(raw, &value.StructuredValue); err != nil {
-		return memory.Record{}, fmt.Errorf("decode memory structured value: %w", err)
-	}
-	if supersedes.Valid {
-		value.SupersedesID = supersedes.String
-	}
-	if supersededBy.Valid {
-		value.SupersededBy = supersededBy.String
-	}
-	if expires.Valid {
-		value.ExpiresAt = &expires.Time
-	}
-	return value, nil
-}
 
 func (s *Store) BatchGet(ctx context.Context, owner memory.Owner, ids []string) ([]memory.Record, error) {
 	if !owner.Valid() || len(ids) == 0 {
@@ -55,28 +24,19 @@ func (s *Store) BatchGet(ctx context.Context, owner memory.Owner, ids []string) 
 	if len(ids) > 200 {
 		return nil, memory.ErrInvalidInput
 	}
-	marks := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
-	args := []any{owner.TenantID, owner.UserID}
-	for _, id := range ids {
-		args = append(args, id)
-	}
-	rows, err := s.db.QueryContext(ctx, `SELECT `+memoryColumns+` FROM memory_records WHERE tenant_id=? AND user_id=? AND id IN (`+marks+`)`, args...)
-	if err != nil {
+	var rows []memoryRecordRow
+	if err := s.db.WithContext(ctx).Where("tenant_id=? AND user_id=? AND id IN ?", owner.TenantID, owner.UserID, ids).Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	byID := map[string]memory.Record{}
-	for rows.Next() {
-		value, err := scanMemory(rows)
+	byID := make(map[string]memory.Record, len(rows))
+	for _, row := range rows {
+		value, err := memoryFromRow(row)
 		if err != nil {
 			return nil, err
 		}
 		byID[value.ID] = value
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	out := make([]memory.Record, 0, len(byID))
+	out := make([]memory.Record, 0, len(rows))
 	for _, id := range ids {
 		if value, ok := byID[id]; ok {
 			out = append(out, value)
@@ -99,18 +59,12 @@ func (s *Store) FindExact(ctx context.Context, q memory.ExactQuery) ([]memory.Re
 		args = append(args, q.ActiveAt.UTC())
 	}
 	if len(q.Layers) > 0 {
-		marks := strings.TrimSuffix(strings.Repeat("?,", len(q.Layers)), ",")
-		where = append(where, "layer IN ("+marks+")")
-		for _, value := range q.Layers {
-			args = append(args, value)
-		}
+		where = append(where, "layer IN ?")
+		args = append(args, q.Layers)
 	}
 	if len(q.Kinds) > 0 {
-		marks := strings.TrimSuffix(strings.Repeat("?,", len(q.Kinds)), ",")
-		where = append(where, "kind IN ("+marks+")")
-		for _, value := range q.Kinds {
-			args = append(args, value)
-		}
+		where = append(where, "kind IN ?")
+		args = append(args, q.Kinds)
 	}
 	var matches []string
 	if q.ScopeOnly {
@@ -140,34 +94,31 @@ func (s *Store) FindExact(ctx context.Context, q memory.ExactQuery) ([]memory.Re
 		matches = append(matches, "(entity_type=? AND entity_id=?)")
 		args = append(args, entity.Type, entity.ID)
 	}
-	if len(q.Refs) > 0 {
-		for _, ref := range q.Refs {
-			matches = append(matches, "(id=? AND lineage_version=? AND content_hash=?)")
-			args = append(args, ref.ID, ref.LineageVersion, ref.ContentHash)
-		}
+	for _, ref := range q.Refs {
+		matches = append(matches, "(id=? AND lineage_version=? AND content_hash=?)")
+		args = append(args, ref.ID, ref.LineageVersion, ref.ContentHash)
 	}
 	if len(matches) == 0 {
 		return []memory.Record{}, nil
 	}
 	where = append(where, "("+strings.Join(matches, " OR ")+")")
-	args = append(args, q.Limit)
-	rows, err := s.db.QueryContext(ctx, `SELECT `+memoryColumns+` FROM memory_records WHERE `+strings.Join(where, " AND ")+` ORDER BY created_at DESC,id ASC LIMIT ?`, args...)
-	if err != nil {
+	query := s.db.WithContext(ctx).Model(&memoryRecordRow{}).Where(strings.Join(where, " AND "), args...).Order("created_at DESC,id ASC").Limit(q.Limit)
+	var rows []memoryRecordRow
+	if err := query.Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []memory.Record
-	for rows.Next() {
-		value, err := scanMemory(rows)
+	out := make([]memory.Record, 0, len(rows))
+	for _, row := range rows {
+		value, err := memoryFromRow(row)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, value)
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
-func (s *Store) CommitMutation(ctx context.Context, m memory.Mutation) (memory.MutationResult, error) {
+func (s *Store) CommitMutation(ctx context.Context, m memory.Mutation) (result memory.MutationResult, err error) {
 	if m.NewMemory == nil || !m.Owner.Valid() || m.IdempotencyKey == "" || m.InputHash == "" {
 		return memory.MutationResult{}, memory.ErrInvalidInput
 	}
@@ -186,378 +137,343 @@ func (s *Store) CommitMutation(ctx context.Context, m memory.Mutation) (memory.M
 	if err != nil {
 		return memory.MutationResult{}, err
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return memory.MutationResult{}, err
-	}
-	defer tx.Rollback()
-	if result, found, err := loadMemoryIdempotency(ctx, tx, m.Owner, m.IdempotencyKey, m.InputHash); err != nil {
-		return memory.MutationResult{}, err
-	} else if found {
-		if err := tx.Commit(); err != nil {
-			return memory.MutationResult{}, err
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if replay, found, loadErr := loadMemoryIdempotency(tx, m.Owner, m.IdempotencyKey, m.InputHash); loadErr != nil {
+			return loadErr
+		} else if found {
+			replay.Replayed = true
+			result = replay
+			return nil
 		}
-		result.Replayed = true
-		return result, nil
-	}
-	for _, target := range m.Targets {
-		old, err := scanMemory(tx.QueryRowContext(ctx, `SELECT `+memoryColumns+` FROM memory_records WHERE tenant_id=? AND user_id=? AND id=? FOR UPDATE`, m.Owner.TenantID, m.Owner.UserID, target.ID))
-		if err != nil {
-			return memory.MutationResult{}, err
+		for _, target := range m.Targets {
+			old, loadErr := loadMemoryLocked(tx, m.Owner, target.ID)
+			if loadErr != nil {
+				return loadErr
+			}
+			if old.RowVersion != target.ExpectedRowVersion || !old.Status.CanTransition(target.NewStatus) {
+				return memory.ErrStateConflict
+			}
+			updates := map[string]any{"status": target.NewStatus, "row_version": gorm.Expr("row_version+1"), "updated_at": now}
+			if target.NewStatus == memory.StatusSuperseded {
+				updates["superseded_by"] = value.ID
+			}
+			write := tx.Model(&memoryRecordRow{}).Where("tenant_id=? AND user_id=? AND id=? AND row_version=? AND status=?", m.Owner.TenantID, m.Owner.UserID, target.ID, target.ExpectedRowVersion, old.Status).Updates(updates)
+			if write.Error != nil {
+				return mapMemoryWriteError(write.Error)
+			}
+			if write.RowsAffected != 1 {
+				return memory.ErrStateConflict
+			}
 		}
-		if old.RowVersion != target.ExpectedRowVersion || !old.Status.CanTransition(target.NewStatus) {
-			return memory.MutationResult{}, memory.ErrStateConflict
+		if err := insertMemory(tx, value, now); err != nil {
+			return mapMemoryWriteError(err)
 		}
-		result, err := tx.ExecContext(ctx, `UPDATE memory_records SET status=?,superseded_by=CASE WHEN ?='superseded' THEN ? ELSE superseded_by END,row_version=row_version+1,updated_at=? WHERE tenant_id=? AND user_id=? AND id=? AND row_version=? AND status=?`, target.NewStatus, target.NewStatus, value.ID, now, m.Owner.TenantID, m.Owner.UserID, target.ID, target.ExpectedRowVersion, old.Status)
-		if err != nil {
-			return memory.MutationResult{}, mapMemoryWriteError(err)
+		for _, relation := range m.Relations {
+			_, relationReason, validationErr := memory.NormalizeAuditFields("system", relation.ReasonCode)
+			if validationErr != nil {
+				return validationErr
+			}
+			if err := tx.Create(&memoryRelationRow{ID: uuid.NewString(), TenantID: m.Owner.TenantID, UserID: m.Owner.UserID, FromMemoryID: relation.FromID, ToMemoryID: relation.ToID, RelationType: string(relation.Type), ReasonCode: relationReason, CreatedAt: now}).Error; err != nil {
+				return mapMemoryWriteError(err)
+			}
 		}
-		if n, _ := result.RowsAffected(); n != 1 {
-			return memory.MutationResult{}, memory.ErrStateConflict
+		if value.Status == memory.StatusActive {
+			if err := s.insertProjection(tx, value, now); err != nil {
+				return err
+			}
 		}
-	}
-	if err := insertMemory(ctx, tx, value, now); err != nil {
-		return memory.MutationResult{}, mapMemoryWriteError(err)
-	}
-	for _, relation := range m.Relations {
-		_, relationReason, validationErr := memory.NormalizeAuditFields("system", relation.ReasonCode)
-		if validationErr != nil {
-			return memory.MutationResult{}, validationErr
+		eventType := "created"
+		var oldStatus *string
+		if len(m.Targets) > 0 {
+			eventType = "superseded"
+			oldStatus = stringPtr(string(memory.StatusActive))
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO memory_relations (id,tenant_id,user_id,from_memory_id,to_memory_id,relation_type,reason_code,created_at) VALUES (?,?,?,?,?,?,?,?)`, uuid.NewString(), m.Owner.TenantID, m.Owner.UserID, relation.FromID, relation.ToID, relation.Type, relationReason, now); err != nil {
-			return memory.MutationResult{}, mapMemoryWriteError(err)
+		if err := tx.Create(&memoryEventRow{ID: uuid.NewString(), TenantID: m.Owner.TenantID, UserID: m.Owner.UserID, MemoryID: value.ID, EventType: eventType, OldStatus: oldStatus, NewStatus: string(value.Status), Actor: actor, ReasonCode: reason, ExecutionID: m.IdempotencyKey, InputHash: m.InputHash, ResultMemoryID: value.ID, OccurredAt: now}).Error; err != nil {
+			return mapMemoryWriteError(err)
 		}
-	}
-	if value.Status == memory.StatusActive {
-		if err := s.insertProjection(ctx, tx, value, now); err != nil {
-			return memory.MutationResult{}, err
-		}
-	}
-	eventType := "created"
-	oldStatus := any(nil)
-	if len(m.Targets) > 0 {
-		eventType = "superseded"
-		oldStatus = memory.StatusActive
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO memory_events (id,tenant_id,user_id,memory_id,event_type,old_status,new_status,actor,reason_code,execution_id,input_hash,result_memory_id,occurred_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, uuid.NewString(), m.Owner.TenantID, m.Owner.UserID, value.ID, eventType, oldStatus, value.Status, actor, reason, m.IdempotencyKey, m.InputHash, value.ID, now); err != nil {
-		return memory.MutationResult{}, mapMemoryWriteError(err)
-	}
-	if err := tx.Commit(); err != nil {
-		return memory.MutationResult{}, err
-	}
-	return memory.MutationResult{Memory: value, Relations: append([]memory.Relation(nil), m.Relations...)}, nil
+		result = memory.MutationResult{Memory: value, Relations: append([]memory.Relation(nil), m.Relations...)}
+		return nil
+	})
+	return
 }
 
-func insertMemory(ctx context.Context, tx *sql.Tx, v memory.Record, now time.Time) error {
-	raw, err := json.Marshal(v.StructuredValue)
+func insertMemory(tx *gorm.DB, v memory.Record, now time.Time) error {
+	row, err := memoryToRow(v, now)
 	if err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO memory_records (`+memoryColumns+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		v.ID, v.Owner.TenantID, v.Owner.UserID, v.Layer, v.Kind, v.Scope.Type, v.Scope.ID, v.Namespace, v.SlotKey, v.Entity.Type, v.Entity.ID,
-		v.LineageID, v.LineageVersion, v.RowVersion, v.CanonicalText, raw, v.ContentHash, v.Authority, v.Confidence, v.Salience, v.Source.Type,
-		v.Source.ID, v.Source.EvidenceID, v.Status, nullableString(v.SupersedesID), nullableString(v.SupersededBy), v.ExpiresAt, now, now)
-	return err
+	return tx.Create(&row).Error
 }
-
-func (s *Store) insertProjection(ctx context.Context, tx *sql.Tx, v memory.Record, now time.Time) error {
+func (s *Store) insertProjection(tx *gorm.DB, v memory.Record, now time.Time) error {
 	if s.projectionVersion == "" {
 		return fmt.Errorf("%w: projection version is not configured", memory.ErrInvalidInput)
 	}
-	id := projectionOutboxID(v.ID, v.ContentHash, s.projectionVersion)
-	_, err := tx.ExecContext(ctx, `INSERT INTO memory_projection_outbox (id,tenant_id,user_id,memory_id,content_hash,model_version,status,available_at,created_at) VALUES (?,?,?,?,?,?,'pending',?,?)`, id, v.Owner.TenantID, v.Owner.UserID, v.ID, v.ContentHash, s.projectionVersion, now, now)
-	return err
+	return tx.Create(&memoryProjectionRow{ID: projectionOutboxID(v.ID, v.ContentHash, s.projectionVersion), TenantID: v.Owner.TenantID, UserID: v.Owner.UserID, MemoryID: v.ID, ContentHash: v.ContentHash, ModelVersion: s.projectionVersion, Status: string(memory.ProjectionPending), AvailableAt: now, CreatedAt: now}).Error
 }
-
 func projectionOutboxID(memoryID, contentHash, version string) string {
 	sum := sha256.Sum256([]byte(memoryID + "\x00" + contentHash + "\x00" + version))
 	return hex.EncodeToString(sum[:])
 }
 
-func loadMemoryIdempotency(ctx context.Context, tx *sql.Tx, owner memory.Owner, key, inputHash string) (memory.MutationResult, bool, error) {
-	var storedHash, resultID string
-	err := tx.QueryRowContext(ctx, `SELECT input_hash,result_memory_id FROM memory_events WHERE tenant_id=? AND user_id=? AND execution_id=?`, owner.TenantID, owner.UserID, key).Scan(&storedHash, &resultID)
-	if errors.Is(err, sql.ErrNoRows) {
+func loadMemoryIdempotency(tx *gorm.DB, owner memory.Owner, key, inputHash string) (memory.MutationResult, bool, error) {
+	var event memoryEventRow
+	err := tx.Where("tenant_id=? AND user_id=? AND execution_id=?", owner.TenantID, owner.UserID, key).First(&event).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return memory.MutationResult{}, false, nil
 	}
 	if err != nil {
 		return memory.MutationResult{}, false, err
 	}
-	if storedHash != inputHash {
+	if event.InputHash != inputHash {
 		return memory.MutationResult{}, false, memory.ErrIdempotencyConflict
 	}
-	value, err := scanMemory(tx.QueryRowContext(ctx, `SELECT `+memoryColumns+` FROM memory_records WHERE tenant_id=? AND user_id=? AND id=?`, owner.TenantID, owner.UserID, resultID))
+	var row memoryRecordRow
+	err = tx.Where("tenant_id=? AND user_id=? AND id=?", owner.TenantID, owner.UserID, event.ResultMemoryID).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return memory.MutationResult{}, false, memory.ErrNotFound
+	}
+	if err != nil {
+		return memory.MutationResult{}, false, err
+	}
+	value, err := memoryFromRow(row)
 	return memory.MutationResult{Memory: value}, true, err
 }
 
-func (s *Store) TransitionMemory(ctx context.Context, owner memory.Owner, id string, expected uint64, to memory.Status, actor, reason, key, inputHash string, now time.Time) (memory.MutationResult, error) {
+func (s *Store) TransitionMemory(ctx context.Context, owner memory.Owner, id string, expected uint64, to memory.Status, actor, reason, key, inputHash string, now time.Time) (result memory.MutationResult, err error) {
 	if !owner.Valid() || id == "" || key == "" || inputHash == "" {
 		return memory.MutationResult{}, memory.ErrInvalidInput
 	}
-	normalizedActor, normalizedReason, err := memory.NormalizeAuditFields(actor, reason)
+	actor, reason, err = normalizeAudit(actor, reason)
 	if err != nil {
 		return memory.MutationResult{}, err
 	}
-	actor, reason = normalizedActor, normalizedReason
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return memory.MutationResult{}, err
-	}
-	defer tx.Rollback()
-	if result, found, err := loadMemoryIdempotency(ctx, tx, owner, key, inputHash); err != nil {
-		return memory.MutationResult{}, err
-	} else if found {
-		result.Replayed = true
-		if err := tx.Commit(); err != nil {
-			return memory.MutationResult{}, err
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if replay, found, loadErr := loadMemoryIdempotency(tx, owner, key, inputHash); loadErr != nil {
+			return loadErr
+		} else if found {
+			replay.Replayed = true
+			result = replay
+			return nil
 		}
-		return result, nil
-	}
-	value, err := scanMemory(tx.QueryRowContext(ctx, `SELECT `+memoryColumns+` FROM memory_records WHERE tenant_id=? AND user_id=? AND id=? FOR UPDATE`, owner.TenantID, owner.UserID, id))
-	if err != nil {
-		return memory.MutationResult{}, err
-	}
-	if value.RowVersion != expected || !value.Status.CanTransition(to) {
-		return memory.MutationResult{}, memory.ErrStateConflict
-	}
-	old := value.Status
-	result, err := tx.ExecContext(ctx, `UPDATE memory_records SET status=?,row_version=row_version+1,updated_at=? WHERE tenant_id=? AND user_id=? AND id=? AND status=? AND row_version=?`, to, now, owner.TenantID, owner.UserID, id, old, expected)
-	if err != nil {
-		return memory.MutationResult{}, mapMemoryWriteError(err)
-	}
-	if n, _ := result.RowsAffected(); n != 1 {
-		return memory.MutationResult{}, memory.ErrStateConflict
-	}
-	value.Status, value.RowVersion, value.UpdatedAt = to, value.RowVersion+1, now
-	if to == memory.StatusActive {
-		if err := s.insertProjection(ctx, tx, value, now); err != nil {
-			return memory.MutationResult{}, err
+		value, loadErr := loadMemoryLocked(tx, owner, id)
+		if loadErr != nil {
+			return loadErr
 		}
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO memory_events (id,tenant_id,user_id,memory_id,event_type,old_status,new_status,actor,reason_code,execution_id,input_hash,result_memory_id,occurred_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, uuid.NewString(), owner.TenantID, owner.UserID, id, to, old, to, actor, reason, key, inputHash, id, now); err != nil {
-		return memory.MutationResult{}, mapMemoryWriteError(err)
-	}
-	if err := tx.Commit(); err != nil {
-		return memory.MutationResult{}, err
-	}
-	return memory.MutationResult{Memory: value}, nil
+		if value.RowVersion != expected || !value.Status.CanTransition(to) {
+			return memory.ErrStateConflict
+		}
+		old := value.Status
+		write := tx.Model(&memoryRecordRow{}).Where("tenant_id=? AND user_id=? AND id=? AND status=? AND row_version=?", owner.TenantID, owner.UserID, id, old, expected).Updates(map[string]any{"status": to, "row_version": gorm.Expr("row_version+1"), "updated_at": now})
+		if write.Error != nil {
+			return mapMemoryWriteError(write.Error)
+		}
+		if write.RowsAffected != 1 {
+			return memory.ErrStateConflict
+		}
+		value.Status, value.RowVersion, value.UpdatedAt = to, value.RowVersion+1, now
+		if to == memory.StatusActive {
+			if err := s.insertProjection(tx, value, now); err != nil {
+				return err
+			}
+		}
+		if err := tx.Create(&memoryEventRow{ID: uuid.NewString(), TenantID: owner.TenantID, UserID: owner.UserID, MemoryID: id, EventType: string(to), OldStatus: stringPtr(string(old)), NewStatus: string(to), Actor: actor, ReasonCode: reason, ExecutionID: key, InputHash: inputHash, ResultMemoryID: id, OccurredAt: now}).Error; err != nil {
+			return mapMemoryWriteError(err)
+		}
+		result = memory.MutationResult{Memory: value}
+		return nil
+	})
+	return
 }
 
-func (s *Store) ActivateCandidateSuperseding(ctx context.Context, activation memory.CandidateActivation) (memory.MutationResult, error) {
-	if !activation.Owner.Valid() || activation.CandidateID == "" || activation.SupersededID == "" || activation.CandidateID == activation.SupersededID || activation.CandidateVersion == 0 || activation.TargetVersion == 0 || activation.IdempotencyKey == "" || activation.InputHash == "" {
+func (s *Store) ActivateCandidateSuperseding(ctx context.Context, a memory.CandidateActivation) (result memory.MutationResult, err error) {
+	if !a.Owner.Valid() || a.CandidateID == "" || a.SupersededID == "" || a.CandidateID == a.SupersededID || a.CandidateVersion == 0 || a.TargetVersion == 0 || a.IdempotencyKey == "" || a.InputHash == "" {
 		return memory.MutationResult{}, memory.ErrInvalidInput
 	}
-	actor, reason, err := memory.NormalizeAuditFields(activation.Actor, activation.ReasonCode)
+	actor, reason, err := memory.NormalizeAuditFields(a.Actor, a.ReasonCode)
 	if err != nil {
 		return memory.MutationResult{}, err
 	}
-	now := activation.OccurredAt.UTC()
+	now := a.OccurredAt.UTC()
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return memory.MutationResult{}, err
-	}
-	defer tx.Rollback()
-	if result, found, loadErr := loadMemoryIdempotency(ctx, tx, activation.Owner, activation.IdempotencyKey, activation.InputHash); loadErr != nil {
-		return memory.MutationResult{}, loadErr
-	} else if found {
-		result.Replayed = true
-		if err := tx.Commit(); err != nil {
-			return memory.MutationResult{}, err
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if replay, found, loadErr := loadMemoryIdempotency(tx, a.Owner, a.IdempotencyKey, a.InputHash); loadErr != nil {
+			return loadErr
+		} else if found {
+			replay.Replayed = true
+			result = replay
+			return nil
 		}
-		return result, nil
-	}
-	rows, err := tx.QueryContext(ctx, `SELECT `+memoryColumns+` FROM memory_records WHERE tenant_id=? AND user_id=? AND id IN (?,?) ORDER BY id FOR UPDATE`, activation.Owner.TenantID, activation.Owner.UserID, activation.CandidateID, activation.SupersededID)
-	if err != nil {
-		return memory.MutationResult{}, err
-	}
-	locked := map[string]memory.Record{}
-	for rows.Next() {
-		value, scanErr := scanMemory(rows)
-		if scanErr != nil {
-			rows.Close()
-			return memory.MutationResult{}, scanErr
+		var rows []memoryRecordRow
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("tenant_id=? AND user_id=? AND id IN ?", a.Owner.TenantID, a.Owner.UserID, []string{a.CandidateID, a.SupersededID}).Order("id").Find(&rows).Error; err != nil {
+			return err
 		}
-		locked[value.ID] = value
-	}
-	if err := rows.Close(); err != nil {
-		return memory.MutationResult{}, err
-	}
-	candidate, candidateOK := locked[activation.CandidateID]
-	target, targetOK := locked[activation.SupersededID]
-	if !candidateOK || !targetOK {
-		return memory.MutationResult{}, memory.ErrNotFound
-	}
-	if candidate.RowVersion != activation.CandidateVersion || target.RowVersion != activation.TargetVersion || candidate.Status != memory.StatusCandidate || target.Status != memory.StatusActive || !candidate.Status.CanTransition(memory.StatusActive) || !target.Status.CanTransition(memory.StatusSuperseded) || candidate.SupersedesID != target.ID || candidate.LineageID != target.LineageID || candidate.LineageVersion <= target.LineageVersion {
-		return memory.MutationResult{}, memory.ErrStateConflict
-	}
-	updated, err := tx.ExecContext(ctx, `UPDATE memory_records SET status='superseded',superseded_by=?,row_version=row_version+1,updated_at=? WHERE tenant_id=? AND user_id=? AND id=? AND status='active' AND row_version=?`, candidate.ID, now, activation.Owner.TenantID, activation.Owner.UserID, target.ID, activation.TargetVersion)
-	if err != nil {
-		return memory.MutationResult{}, mapMemoryWriteError(err)
-	}
-	if count, _ := updated.RowsAffected(); count != 1 {
-		return memory.MutationResult{}, memory.ErrStateConflict
-	}
-	updated, err = tx.ExecContext(ctx, `UPDATE memory_records SET status='active',row_version=row_version+1,updated_at=? WHERE tenant_id=? AND user_id=? AND id=? AND status='candidate' AND row_version=?`, now, activation.Owner.TenantID, activation.Owner.UserID, candidate.ID, activation.CandidateVersion)
-	if err != nil {
-		return memory.MutationResult{}, mapMemoryWriteError(err)
-	}
-	if count, _ := updated.RowsAffected(); count != 1 {
-		return memory.MutationResult{}, memory.ErrStateConflict
-	}
-	candidate.Status, candidate.RowVersion, candidate.UpdatedAt = memory.StatusActive, candidate.RowVersion+1, now
-	if _, err := tx.ExecContext(ctx, `INSERT INTO memory_relations (id,tenant_id,user_id,from_memory_id,to_memory_id,relation_type,reason_code,created_at) VALUES (?,?,?,?,?,?,?,?)`, uuid.NewString(), activation.Owner.TenantID, activation.Owner.UserID, candidate.ID, target.ID, memory.RelationSupersedes, reason, now); err != nil {
-		return memory.MutationResult{}, mapMemoryWriteError(err)
-	}
-	if err := s.insertProjection(ctx, tx, candidate, now); err != nil {
-		return memory.MutationResult{}, err
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO memory_events (id,tenant_id,user_id,memory_id,event_type,old_status,new_status,actor,reason_code,execution_id,input_hash,result_memory_id,occurred_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, uuid.NewString(), activation.Owner.TenantID, activation.Owner.UserID, candidate.ID, "activated", memory.StatusCandidate, memory.StatusActive, actor, reason, activation.IdempotencyKey, activation.InputHash, candidate.ID, now); err != nil {
-		return memory.MutationResult{}, mapMemoryWriteError(err)
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO memory_events (id,tenant_id,user_id,memory_id,event_type,old_status,new_status,actor,reason_code,execution_id,input_hash,result_memory_id,occurred_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, uuid.NewString(), activation.Owner.TenantID, activation.Owner.UserID, target.ID, "superseded", memory.StatusActive, memory.StatusSuperseded, actor, reason, activation.IdempotencyKey+":target", activation.InputHash, candidate.ID, now); err != nil {
-		return memory.MutationResult{}, mapMemoryWriteError(err)
-	}
-	if err := tx.Commit(); err != nil {
-		return memory.MutationResult{}, err
-	}
-	return memory.MutationResult{Memory: candidate, Relations: []memory.Relation{{FromID: candidate.ID, ToID: target.ID, Type: memory.RelationSupersedes, ReasonCode: reason}}}, nil
+		locked := map[string]memory.Record{}
+		for _, row := range rows {
+			value, err := memoryFromRow(row)
+			if err != nil {
+				return err
+			}
+			locked[value.ID] = value
+		}
+		candidate, candidateOK := locked[a.CandidateID]
+		target, targetOK := locked[a.SupersededID]
+		if !candidateOK || !targetOK {
+			return memory.ErrNotFound
+		}
+		if candidate.RowVersion != a.CandidateVersion || target.RowVersion != a.TargetVersion || candidate.Status != memory.StatusCandidate || target.Status != memory.StatusActive || !candidate.Status.CanTransition(memory.StatusActive) || !target.Status.CanTransition(memory.StatusSuperseded) || candidate.SupersedesID != target.ID || candidate.LineageID != target.LineageID || candidate.LineageVersion <= target.LineageVersion {
+			return memory.ErrStateConflict
+		}
+		write := tx.Model(&memoryRecordRow{}).Where("tenant_id=? AND user_id=? AND id=? AND status='active' AND row_version=?", a.Owner.TenantID, a.Owner.UserID, target.ID, a.TargetVersion).Updates(map[string]any{"status": "superseded", "superseded_by": candidate.ID, "row_version": gorm.Expr("row_version+1"), "updated_at": now})
+		if write.Error != nil {
+			return mapMemoryWriteError(write.Error)
+		}
+		if write.RowsAffected != 1 {
+			return memory.ErrStateConflict
+		}
+		write = tx.Model(&memoryRecordRow{}).Where("tenant_id=? AND user_id=? AND id=? AND status='candidate' AND row_version=?", a.Owner.TenantID, a.Owner.UserID, candidate.ID, a.CandidateVersion).Updates(map[string]any{"status": "active", "row_version": gorm.Expr("row_version+1"), "updated_at": now})
+		if write.Error != nil {
+			return mapMemoryWriteError(write.Error)
+		}
+		if write.RowsAffected != 1 {
+			return memory.ErrStateConflict
+		}
+		candidate.Status, candidate.RowVersion, candidate.UpdatedAt = memory.StatusActive, candidate.RowVersion+1, now
+		if err := tx.Create(&memoryRelationRow{ID: uuid.NewString(), TenantID: a.Owner.TenantID, UserID: a.Owner.UserID, FromMemoryID: candidate.ID, ToMemoryID: target.ID, RelationType: string(memory.RelationSupersedes), ReasonCode: reason, CreatedAt: now}).Error; err != nil {
+			return mapMemoryWriteError(err)
+		}
+		if err := s.insertProjection(tx, candidate, now); err != nil {
+			return err
+		}
+		events := []memoryEventRow{{ID: uuid.NewString(), TenantID: a.Owner.TenantID, UserID: a.Owner.UserID, MemoryID: candidate.ID, EventType: "activated", OldStatus: stringPtr(string(memory.StatusCandidate)), NewStatus: string(memory.StatusActive), Actor: actor, ReasonCode: reason, ExecutionID: a.IdempotencyKey, InputHash: a.InputHash, ResultMemoryID: candidate.ID, OccurredAt: now}, {ID: uuid.NewString(), TenantID: a.Owner.TenantID, UserID: a.Owner.UserID, MemoryID: target.ID, EventType: "superseded", OldStatus: stringPtr(string(memory.StatusActive)), NewStatus: string(memory.StatusSuperseded), Actor: actor, ReasonCode: reason, ExecutionID: a.IdempotencyKey + ":target", InputHash: a.InputHash, ResultMemoryID: candidate.ID, OccurredAt: now}}
+		if err := tx.Create(&events).Error; err != nil {
+			return mapMemoryWriteError(err)
+		}
+		relation := memory.Relation{FromID: candidate.ID, ToID: target.ID, Type: memory.RelationSupersedes, ReasonCode: reason}
+		result = memory.MutationResult{Memory: candidate, Relations: []memory.Relation{relation}}
+		return nil
+	})
+	return
 }
 
-func (s *Store) Expire(ctx context.Context, owner memory.Owner, now time.Time, limit int) (int, error) {
+func (s *Store) Expire(ctx context.Context, owner memory.Owner, now time.Time, limit int) (count int, err error) {
 	if !owner.Valid() || limit <= 0 || limit > 1000 {
 		return 0, memory.ErrInvalidInput
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, `SELECT `+memoryColumns+` FROM memory_records WHERE tenant_id=? AND user_id=? AND status IN ('candidate','active') AND expires_at IS NOT NULL AND expires_at<=? ORDER BY expires_at LIMIT ? FOR UPDATE SKIP LOCKED`, owner.TenantID, owner.UserID, now, limit)
-	if err != nil {
-		return 0, err
-	}
-	var values []memory.Record
-	for rows.Next() {
-		value, err := scanMemory(rows)
-		if err != nil {
-			rows.Close()
-			return 0, err
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var rows []memoryRecordRow
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).Where("tenant_id=? AND user_id=? AND status IN ? AND expires_at IS NOT NULL AND expires_at<=?", owner.TenantID, owner.UserID, []string{"candidate", "active"}, now).Order("expires_at").Limit(limit).Find(&rows).Error; err != nil {
+			return err
 		}
-		values = append(values, value)
-	}
-	if err := rows.Close(); err != nil {
-		return 0, err
-	}
-	for _, value := range values {
-		result, err := tx.ExecContext(ctx, `UPDATE memory_records SET status='expired',row_version=row_version+1,updated_at=? WHERE tenant_id=? AND user_id=? AND id=? AND row_version=? AND status=?`, now, owner.TenantID, owner.UserID, value.ID, value.RowVersion, value.Status)
-		if err != nil {
-			return 0, err
+		for _, row := range rows {
+			value, err := memoryFromRow(row)
+			if err != nil {
+				return err
+			}
+			write := tx.Model(&memoryRecordRow{}).Where("tenant_id=? AND user_id=? AND id=? AND row_version=? AND status=?", owner.TenantID, owner.UserID, value.ID, value.RowVersion, value.Status).Updates(map[string]any{"status": "expired", "row_version": gorm.Expr("row_version+1"), "updated_at": now})
+			if write.Error != nil {
+				return write.Error
+			}
+			if write.RowsAffected != 1 {
+				return memory.ErrStateConflict
+			}
+			event := memoryEventRow{ID: uuid.NewString(), TenantID: owner.TenantID, UserID: owner.UserID, MemoryID: value.ID, EventType: "expired", OldStatus: stringPtr(string(value.Status)), NewStatus: string(memory.StatusExpired), Actor: "system", ReasonCode: "ttl_expired", ExecutionID: fmt.Sprintf("expiry:%s:%d", value.ID, value.RowVersion), InputHash: value.ContentHash, ResultMemoryID: value.ID, OccurredAt: now}
+			if err := tx.Create(&event).Error; err != nil {
+				return mapMemoryWriteError(err)
+			}
 		}
-		if n, _ := result.RowsAffected(); n != 1 {
-			return 0, memory.ErrStateConflict
-		}
-		executionID := fmt.Sprintf("expiry:%s:%d", value.ID, value.RowVersion)
-		if _, err := tx.ExecContext(ctx, `INSERT INTO memory_events (id,tenant_id,user_id,memory_id,event_type,old_status,new_status,actor,reason_code,execution_id,input_hash,result_memory_id,occurred_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, uuid.NewString(), owner.TenantID, owner.UserID, value.ID, "expired", value.Status, memory.StatusExpired, "system", "ttl_expired", executionID, value.ContentHash, value.ID, now); err != nil {
-			return 0, mapMemoryWriteError(err)
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, err
-	}
-	return len(values), nil
+		count = len(rows)
+		return nil
+	})
+	return
 }
 
-func (s *Store) ClaimProjections(ctx context.Context, limit int, now time.Time) ([]memory.Projection, error) {
+func (s *Store) ClaimProjections(ctx context.Context, limit int, now time.Time) (out []memory.Projection, err error) {
 	if limit <= 0 || limit > 200 {
 		return nil, memory.ErrInvalidInput
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, `SELECT id,tenant_id,user_id,memory_id,content_hash,model_version,status,attempt,available_at,claimed_at,processed_at,last_error_code FROM memory_projection_outbox WHERE status IN ('pending','failed') AND available_at<=? ORDER BY created_at LIMIT ? FOR UPDATE SKIP LOCKED`, now, limit)
-	if err != nil {
-		return nil, err
-	}
-	var out []memory.Projection
-	for rows.Next() {
-		var p memory.Projection
-		var claimed, processed sql.NullTime
-		if err := rows.Scan(&p.ID, &p.Owner.TenantID, &p.Owner.UserID, &p.MemoryID, &p.ContentHash, &p.ModelVersion, &p.Status, &p.Attempt, &p.AvailableAt, &claimed, &processed, &p.LastErrorCode); err != nil {
-			rows.Close()
-			return nil, err
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var rows []memoryProjectionRow
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).Where("status IN ? AND available_at<=?", []string{"pending", "failed"}, now).Order("created_at").Limit(limit).Find(&rows).Error; err != nil {
+			return err
 		}
-		if claimed.Valid {
-			p.ClaimedAt = &claimed.Time
+		for _, row := range rows {
+			attempt := row.Attempt + 1
+			write := tx.Model(&memoryProjectionRow{}).Where("id=? AND status IN ?", row.ID, []string{"pending", "failed"}).Updates(map[string]any{"status": "processing", "attempt": attempt, "claimed_at": now})
+			if write.Error != nil {
+				return write.Error
+			}
+			if write.RowsAffected != 1 {
+				return memory.ErrStateConflict
+			}
+			out = append(out, memory.Projection{ID: row.ID, Owner: memory.Owner{TenantID: row.TenantID, UserID: row.UserID}, MemoryID: row.MemoryID, ContentHash: row.ContentHash, ModelVersion: row.ModelVersion, Status: memory.ProjectionProcessing, Attempt: attempt, AvailableAt: row.AvailableAt, ClaimedAt: &now, ProcessedAt: row.ProcessedAt, LastErrorCode: row.LastErrorCode})
 		}
-		if processed.Valid {
-			p.ProcessedAt = &processed.Time
-		}
-		p.Attempt++
-		p.Status = memory.ProjectionProcessing
-		p.ClaimedAt = &now
-		out = append(out, p)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	for _, p := range out {
-		if _, err := tx.ExecContext(ctx, `UPDATE memory_projection_outbox SET status='processing',attempt=?,claimed_at=? WHERE id=?`, p.Attempt, now, p.ID); err != nil {
-			return nil, err
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-	return out, nil
+		return nil
+	})
+	return
 }
-
 func (s *Store) PendingProjectionCount(ctx context.Context) (int64, error) {
 	var count int64
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM memory_projection_outbox WHERE status IN ('pending','failed')`).Scan(&count)
+	err := s.db.WithContext(ctx).Model(&memoryProjectionRow{}).Where("status IN ?", []string{"pending", "failed"}).Count(&count).Error
 	return count, err
 }
-
 func (s *Store) CompleteProjection(ctx context.Context, owner memory.Owner, id string, now time.Time) error {
-	result, err := s.db.ExecContext(ctx, `UPDATE memory_projection_outbox SET status='completed',processed_at=?,last_error_code='' WHERE id=? AND tenant_id=? AND user_id=? AND status='processing'`, now, id, owner.TenantID, owner.UserID)
-	if err != nil {
-		return err
+	result := s.db.WithContext(ctx).Model(&memoryProjectionRow{}).Where("id=? AND tenant_id=? AND user_id=? AND status='processing'", id, owner.TenantID, owner.UserID).Updates(map[string]any{"status": "completed", "processed_at": now, "last_error_code": ""})
+	if result.Error != nil {
+		return result.Error
 	}
-	if n, _ := result.RowsAffected(); n != 1 {
+	if result.RowsAffected != 1 {
 		return memory.ErrNotFound
 	}
 	return nil
 }
-
 func (s *Store) FailProjection(ctx context.Context, owner memory.Owner, id, code string, next time.Time, permanent bool) error {
-	_, normalizedCode, validationErr := memory.NormalizeAuditFields("system", code)
-	if validationErr != nil {
-		return validationErr
+	_, code, err := memory.NormalizeAuditFields("system", code)
+	if err != nil {
+		return err
 	}
-	code = normalizedCode
 	status := memory.ProjectionFailed
 	if permanent {
 		status = memory.ProjectionPermanentFailed
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE memory_projection_outbox SET status=?,available_at=?,last_error_code=? WHERE id=? AND tenant_id=? AND user_id=? AND status='processing'`, status, next, code, id, owner.TenantID, owner.UserID)
-	if err != nil {
-		return err
+	result := s.db.WithContext(ctx).Model(&memoryProjectionRow{}).Where("id=? AND tenant_id=? AND user_id=? AND status='processing'", id, owner.TenantID, owner.UserID).Updates(map[string]any{"status": status, "available_at": next, "last_error_code": code})
+	if result.Error != nil {
+		return result.Error
 	}
-	if n, _ := result.RowsAffected(); n != 1 {
+	if result.RowsAffected != 1 {
 		return memory.ErrNotFound
 	}
 	return nil
 }
 
-func nullableString(value string) any {
-	if value == "" {
-		return nil
+func memoryToRow(v memory.Record, now time.Time) (memoryRecordRow, error) {
+	raw, err := json.Marshal(v.StructuredValue)
+	if err != nil {
+		return memoryRecordRow{}, err
 	}
-	return value
+	return memoryRecordRow{ID: v.ID, TenantID: v.Owner.TenantID, UserID: v.Owner.UserID, Layer: string(v.Layer), Kind: string(v.Kind), ScopeType: string(v.Scope.Type), ScopeID: v.Scope.ID, Namespace: v.Namespace, SlotKey: v.SlotKey, EntityType: v.Entity.Type, EntityID: v.Entity.ID, LineageID: v.LineageID, LineageVersion: v.LineageVersion, RowVersion: v.RowVersion, CanonicalText: v.CanonicalText, StructuredValue: raw, ContentHash: v.ContentHash, Authority: string(v.Authority), Confidence: v.Confidence, Salience: v.Salience, SourceType: v.Source.Type, SourceID: v.Source.ID, EvidenceID: v.Source.EvidenceID, Status: string(v.Status), SupersedesID: stringPtr(v.SupersedesID), SupersededBy: stringPtr(v.SupersededBy), ExpiresAt: v.ExpiresAt, CreatedAt: now, UpdatedAt: now}, nil
+}
+func memoryFromRow(row memoryRecordRow) (memory.Record, error) {
+	var structured memory.StructuredValue
+	if err := json.Unmarshal(row.StructuredValue, &structured); err != nil {
+		return memory.Record{}, fmt.Errorf("decode memory structured value: %w", err)
+	}
+	return memory.Record{ID: row.ID, Owner: memory.Owner{TenantID: row.TenantID, UserID: row.UserID}, Layer: memory.Layer(row.Layer), Kind: memory.Kind(row.Kind), Scope: memory.Scope{Type: memory.ScopeType(row.ScopeType), ID: row.ScopeID}, Namespace: row.Namespace, SlotKey: row.SlotKey, Entity: memory.EntityRef{Type: row.EntityType, ID: row.EntityID}, LineageID: row.LineageID, LineageVersion: row.LineageVersion, RowVersion: row.RowVersion, CanonicalText: row.CanonicalText, StructuredValue: structured, ContentHash: row.ContentHash, Authority: memory.Authority(row.Authority), Confidence: row.Confidence, Salience: row.Salience, Source: memory.SourceRef{Type: row.SourceType, ID: row.SourceID, EvidenceID: row.EvidenceID}, Status: memory.Status(row.Status), SupersedesID: stringValue(row.SupersedesID), SupersededBy: stringValue(row.SupersededBy), ExpiresAt: row.ExpiresAt, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}, nil
+}
+func loadMemoryLocked(tx *gorm.DB, owner memory.Owner, id string) (memory.Record, error) {
+	var row memoryRecordRow
+	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("tenant_id=? AND user_id=? AND id=?", owner.TenantID, owner.UserID, id).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return memory.Record{}, memory.ErrNotFound
+	}
+	if err != nil {
+		return memory.Record{}, err
+	}
+	return memoryFromRow(row)
+}
+func normalizeAudit(actor, reason string) (string, string, error) {
+	return memory.NormalizeAuditFields(actor, reason)
 }
 func safeReason(value string) string {
 	value = strings.TrimSpace(value)
@@ -570,10 +486,12 @@ func mapMemoryWriteError(err error) error {
 	if err == nil {
 		return nil
 	}
-	if strings.Contains(err.Error(), "Duplicate entry") {
+	if errors.Is(err, gorm.ErrDuplicatedKey) {
+		return memory.ErrStateConflict
+	}
+	var mysqlErr *mysqlDriver.MySQLError
+	if errors.As(err, &mysqlErr) && mysqlErr.Number == 1062 {
 		return memory.ErrStateConflict
 	}
 	return err
 }
-
-var _ memory.Repository = (*Store)(nil)

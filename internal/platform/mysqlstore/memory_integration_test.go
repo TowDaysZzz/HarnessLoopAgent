@@ -204,6 +204,66 @@ func TestMemoryCandidateTransitionsAndExpiry(t *testing.T) {
 	}
 }
 
+func TestMemoryProjectionWorkersUseSkipLockedWithoutDuplicateClaims(t *testing.T) {
+	store, ctx := openMemoryStore(t)
+	owner := memory.Owner{TenantID: 9301, UserID: uint64(time.Now().UnixNano()%500000000) + 6000000000}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	for i := 0; i < 4; i++ {
+		value := integrationMemory(t, owner, memory.StatusActive, "worker-"+uuid.NewString(), now.Add(time.Duration(i)*time.Microsecond))
+		if _, err := store.CommitMutation(ctx, memory.Mutation{Owner: owner, NewMemory: &value, IdempotencyKey: uuid.NewString(), InputHash: value.ContentHash, OccurredAt: value.CreatedAt}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	claims := make(chan []memory.Projection, 2)
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			values, err := store.ClaimProjections(context.Background(), 2, now.Add(time.Second))
+			claims <- values
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(claims)
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	seen := map[string]struct{}{}
+	count := 0
+	for values := range claims {
+		for _, value := range values {
+			count++
+			if _, duplicate := seen[value.ID]; duplicate {
+				t.Fatalf("projection %s was claimed twice", value.ID)
+			}
+			seen[value.ID] = struct{}{}
+		}
+	}
+	if count == 0 {
+		t.Fatal("concurrent workers claimed no projections")
+	}
+	rest, err := store.ClaimProjections(ctx, 20, now.Add(2*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range rest {
+		if _, duplicate := seen[value.ID]; duplicate {
+			t.Fatalf("projection %s was claimed again during drain", value.ID)
+		}
+		seen[value.ID] = struct{}{}
+		count++
+	}
+	if count < 4 {
+		t.Fatalf("claimed and drained=%d want at least 4", count)
+	}
+}
+
 func stringsOf(ch byte, n int) string {
 	value := make([]byte, n)
 	for i := range value {

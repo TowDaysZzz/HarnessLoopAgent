@@ -25,7 +25,7 @@ func TestIntegrationDurableWorkflowLifecycle(t *testing.T) {
 	}
 	defer base.Close()
 	var chatRunsBefore int
-	_ = base.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM agent_runs`).Scan(&chatRunsBefore)
+	_ = base.db.WithContext(ctx).Raw(`SELECT COUNT(*) FROM agent_runs`).Scan(&chatRunsBefore).Error
 	if err := base.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -33,12 +33,12 @@ func TestIntegrationDurableWorkflowLifecycle(t *testing.T) {
 		t.Fatalf("idempotent Migrate() = %v", err)
 	}
 	var chatRunsAfter int
-	if err := base.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM agent_runs`).Scan(&chatRunsAfter); err != nil || chatRunsAfter != chatRunsBefore {
+	if err := base.db.WithContext(ctx).Raw(`SELECT COUNT(*) FROM agent_runs`).Scan(&chatRunsAfter).Error; err != nil || chatRunsAfter != chatRunsBefore {
 		t.Fatalf("chat runs changed during workflow migration: %d -> %d, %v", chatRunsBefore, chatRunsAfter, err)
 	}
 	for _, table := range []string{"workflow_runs", "workflow_waits", "workflow_node_events"} {
 		var count int
-		if err := base.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=?`, table).Scan(&count); err != nil || count != 1 {
+		if err := base.db.WithContext(ctx).Raw(`SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=?`, table).Scan(&count).Error; err != nil || count != 1 {
 			t.Fatalf("table %s count=%d err=%v", table, count, err)
 		}
 	}
@@ -104,7 +104,7 @@ func TestIntegrationDurableWorkflowLifecycle(t *testing.T) {
 		{Sequence: 5, WorkflowID: state.Meta.WorkflowID, RunID: runID, NodeID: "review", Type: workflow.EventNodeCompleted, Status: workflow.RunRunning, Attempt: 2, ResumeCount: 1, OccurredAt: now},
 	}
 	actor := workflow.ActorRef{Type: "user", ID: "7001"}
-	if _, err := base.db.ExecContext(ctx, `INSERT INTO workflow_node_events (run_id,sequence,workflow_id,node_id,event_type,run_status,attempt,resume_count,duration_ns,occurred_at) VALUES (?,?,?,?,?,?,?,?,?,?)`, runID, 5, state.Meta.WorkflowID, "injected", workflow.EventNodeFailed, workflow.RunFailed, 1, 0, 0, now); err != nil {
+	if err := base.db.WithContext(ctx).Exec(`INSERT INTO workflow_node_events (run_id,sequence,workflow_id,node_id,event_type,run_status,attempt,resume_count,duration_ns,occurred_at) VALUES (?,?,?,?,?,?,?,?,?,?)`, runID, 5, state.Meta.WorkflowID, "injected", workflow.EventNodeFailed, workflow.RunFailed, 1, 0, 0, now).Error; err != nil {
 		t.Fatalf("inject event conflict = %v", err)
 	}
 	commitRequest := workflow.CommitExecutionRequest{Owner: owner, RunID: runID, Token: resumeClaim.Token, ExpectedStateVersion: 4, Checkpoint: completedCheckpoint, Events: resumeEvents, ResolvedWaitID: wait.ID, ResolvedAction: workflow.ActionApprove, Actor: &actor, Now: now}
@@ -120,10 +120,10 @@ func TestIntegrationDurableWorkflowLifecycle(t *testing.T) {
 		t.Fatalf("wait after rollback = %#v, %v", waitAfterRollback, err)
 	}
 	var eventCount int
-	if err := base.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM workflow_node_events WHERE run_id=? AND sequence IN (3,4)`, runID).Scan(&eventCount); err != nil || eventCount != 0 {
+	if err := base.db.WithContext(ctx).Raw(`SELECT COUNT(*) FROM workflow_node_events WHERE run_id=? AND sequence IN (3,4)`, runID).Scan(&eventCount).Error; err != nil || eventCount != 0 {
 		t.Fatalf("partial events after rollback = %d, %v", eventCount, err)
 	}
-	if _, err := base.db.ExecContext(ctx, `DELETE FROM workflow_node_events WHERE run_id=? AND sequence=5`, runID); err != nil {
+	if err := base.db.WithContext(ctx).Exec(`DELETE FROM workflow_node_events WHERE run_id=? AND sequence=5`, runID).Error; err != nil {
 		t.Fatal(err)
 	}
 	if err := store.CommitExecution(ctx, commitRequest); err != nil {
@@ -135,6 +135,45 @@ func TestIntegrationDurableWorkflowLifecycle(t *testing.T) {
 	}
 	if _, err := store.ClaimRun(ctx, workflow.ClaimRunRequest{Owner: owner, RunID: runID, ExpectedStateVersion: 9, Claim: workflow.Claim{Token: "late", LeaseUntil: now.Add(time.Minute)}, Now: now}); !workflow.IsCode(err, workflow.CodeStateConflict) {
 		t.Fatalf("terminal ClaimRun = %v", err)
+	}
+}
+
+func TestGORMWorkflowExpiredLeaseTakeoverAndLeaseLost(t *testing.T) {
+	dsn := os.Getenv("MYSQL_INTEGRATION_DSN")
+	if dsn == "" {
+		t.Skip("set MYSQL_INTEGRATION_DSN to run workflow lease integration test")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	base, err := Open(ctx, Options{DSN: dsn, MaxOpenConns: 8, MaxIdleConns: 4, ConnMaxLifetime: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer base.Close()
+	if err := base.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	store := base.WorkflowStore()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	runID := workflow.WorkflowRunID(uuid.NewString())
+	owner := workflow.WorkflowOwner{TenantID: 9401, OwnerID: uint64(now.UnixNano()%500000000) + 7000000000}
+	state := integrationWorkflowState(runID, now)
+	record := workflow.StoredWorkflow{Owner: owner, IdempotencyKey: "lease-" + uuid.NewString(), Checkpoint: integrationEnvelope(t, state), CreatedAt: now, UpdatedAt: now}
+	if _, _, err := store.CreateRun(ctx, workflow.CreateStoredRun{Run: record}); err != nil {
+		t.Fatal(err)
+	}
+	first := workflow.Claim{Token: "first-" + uuid.NewString(), LeaseUntil: now.Add(time.Second)}
+	if _, err := store.ClaimRun(ctx, workflow.ClaimRunRequest{Owner: owner, RunID: runID, ExpectedStateVersion: 0, Claim: first, Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	takeoverNow := now.Add(2 * time.Second)
+	second := workflow.Claim{Token: "second-" + uuid.NewString(), LeaseUntil: takeoverNow.Add(time.Minute)}
+	claimed, err := store.ClaimRun(ctx, workflow.ClaimRunRequest{Owner: owner, RunID: runID, ExpectedStateVersion: 0, Claim: second, Now: takeoverNow})
+	if err != nil || claimed.Claim == nil || claimed.Claim.Token != second.Token {
+		t.Fatalf("takeover=%+v err=%v", claimed, err)
+	}
+	if err := store.RenewClaim(ctx, workflow.RenewClaimRequest{Owner: owner, RunID: runID, Token: first.Token, Now: takeoverNow, Until: takeoverNow.Add(time.Minute)}); !workflow.IsCode(err, workflow.CodeLeaseLost) {
+		t.Fatalf("stale renew=%v", err)
 	}
 }
 

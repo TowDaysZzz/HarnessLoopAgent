@@ -30,7 +30,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 			if statement == "" {
 				continue
 			}
-			if _, err := s.db.ExecContext(ctx, statement); err != nil {
+			if err := s.db.WithContext(ctx).Exec(statement).Error; err != nil {
 				return fmt.Errorf("apply migration %s: %w", entry.Name(), err)
 			}
 		}
@@ -52,14 +52,21 @@ func (s *Store) ensureMemoryExactIndexes(ctx context.Context) error {
 	}
 	for _, index := range indexes {
 		var count int
-		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='memory_records' AND INDEX_NAME=?`, index.name).Scan(&count); err != nil {
+		if err := s.db.WithContext(ctx).Raw(`SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='memory_records' AND INDEX_NAME=?`, index.name).Scan(&count).Error; err != nil {
 			return fmt.Errorf("inspect memory index %s: %w", index.name, err)
 		}
 		if count != 0 {
 			continue
 		}
-		if _, err := s.db.ExecContext(ctx, "ALTER TABLE memory_records ADD INDEX "+index.name+" ("+index.columns+")"); err != nil {
-			return fmt.Errorf("add memory index %s: %w", index.name, err)
+		if err := s.db.WithContext(ctx).Exec("ALTER TABLE memory_records ADD INDEX " + index.name + " (" + index.columns + ")").Error; err != nil {
+			// Another process may have added the index after our information_schema
+			// check. Re-read the schema before treating the ALTER failure as fatal.
+			if inspectErr := s.db.WithContext(ctx).Raw(`SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='memory_records' AND INDEX_NAME=?`, index.name).Scan(&count).Error; inspectErr != nil {
+				return fmt.Errorf("inspect memory index %s after add failure: %w", index.name, inspectErr)
+			}
+			if count == 0 {
+				return fmt.Errorf("add memory index %s: %w", index.name, err)
+			}
 		}
 	}
 	return nil
@@ -74,33 +81,33 @@ func (s *Store) ensureChatSessionOwnership(ctx context.Context) error {
 		{name: "tenant_id", definition: "BIGINT UNSIGNED NOT NULL DEFAULT 0 AFTER user_id"},
 	} {
 		var count int
-		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'chat_sessions' AND COLUMN_NAME = ?`, column.name).Scan(&count); err != nil {
+		if err := s.db.WithContext(ctx).Raw(`SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'chat_sessions' AND COLUMN_NAME = ?`, column.name).Scan(&count).Error; err != nil {
 			return fmt.Errorf("inspect chat_sessions.%s: %w", column.name, err)
 		}
 		if count == 0 {
-			if _, err := s.db.ExecContext(ctx, "ALTER TABLE chat_sessions ADD COLUMN "+column.name+" "+column.definition); err != nil {
+			if err := s.db.WithContext(ctx).Exec("ALTER TABLE chat_sessions ADD COLUMN " + column.name + " " + column.definition).Error; err != nil {
 				return fmt.Errorf("add chat_sessions.%s: %w", column.name, err)
 			}
 		}
 	}
 	var indexCount int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'chat_sessions' AND INDEX_NAME = 'idx_chat_sessions_owner_updated'`).Scan(&indexCount); err != nil {
+	if err := s.db.WithContext(ctx).Raw(`SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'chat_sessions' AND INDEX_NAME = 'idx_chat_sessions_owner_updated'`).Scan(&indexCount).Error; err != nil {
 		return fmt.Errorf("inspect chat session owner index: %w", err)
 	}
 	if indexCount == 0 {
-		if _, err := s.db.ExecContext(ctx, `ALTER TABLE chat_sessions ADD INDEX idx_chat_sessions_owner_updated (tenant_id, user_id, updated_at)`); err != nil {
+		if err := s.db.WithContext(ctx).Exec(`ALTER TABLE chat_sessions ADD INDEX idx_chat_sessions_owner_updated (tenant_id, user_id, updated_at)`).Error; err != nil {
 			return fmt.Errorf("add chat session owner index: %w", err)
 		}
 	}
 	// Existing sessions can only be assigned safely when the installation has exactly one distinct user.
-	_, err := s.db.ExecContext(ctx, `UPDATE chat_sessions cs
+	err := s.db.WithContext(ctx).Exec(`UPDATE chat_sessions cs
 		JOIN (
 			SELECT MIN(user_id) AS user_id, MIN(tenant_id) AS tenant_id
 			FROM agent_user_sessions
 			HAVING COUNT(DISTINCT CONCAT(tenant_id, ':', user_id)) = 1
 		) owner
 		SET cs.user_id = owner.user_id, cs.tenant_id = owner.tenant_id
-		WHERE cs.user_id = 0 AND cs.tenant_id = 0`)
+		WHERE cs.user_id = 0 AND cs.tenant_id = 0`).Error
 	if err != nil {
 		return fmt.Errorf("backfill chat session owner: %w", err)
 	}
