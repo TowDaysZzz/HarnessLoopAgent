@@ -60,3 +60,32 @@ func TestExactQueryRejectsUnboundedOrMalformedInput(t *testing.T) {
 		}
 	}
 }
+
+func TestMutationVersionAdvancesOncePerSuccessfulMutationAndIsOwnerScoped(t *testing.T) {
+	repo := NewFakeRepository()
+	now := time.Now().UTC()
+	value := exactRecallRecord(t, now, "versioned", "slot", "", "", "value")
+	result, err := repo.CommitMutation(context.Background(), Mutation{Owner: value.Owner, NewMemory: &value, IdempotencyKey: "version-create", InputHash: value.ContentHash, OccurredAt: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, _ := repo.MutationVersion(context.Background(), value.Owner)
+	if first != 1 {
+		t.Fatalf("first version=%d", first)
+	}
+	if replay, err := repo.CommitMutation(context.Background(), Mutation{Owner: value.Owner, NewMemory: &value, IdempotencyKey: "version-create", InputHash: value.ContentHash, OccurredAt: now}); err != nil || !replay.Replayed {
+		t.Fatalf("replay=%#v err=%v", replay, err)
+	}
+	if got, _ := repo.MutationVersion(context.Background(), value.Owner); got != first {
+		t.Fatalf("replay advanced version=%d", got)
+	}
+	if _, err := repo.TransitionMemory(context.Background(), value.Owner, result.Memory.ID, result.Memory.RowVersion, StatusRevoked, "user", "revoke", "version-revoke", value.ContentHash, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := repo.MutationVersion(context.Background(), value.Owner); got != 2 {
+		t.Fatalf("transition version=%d", got)
+	}
+	if got, _ := repo.MutationVersion(context.Background(), Owner{TenantID: value.Owner.TenantID, UserID: value.Owner.UserID + 1}); got != 0 {
+		t.Fatalf("cross owner version=%d", got)
+	}
+}

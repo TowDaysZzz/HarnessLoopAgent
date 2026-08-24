@@ -1,0 +1,21 @@
+CREATE TABLE IF NOT EXISTS daily_review_cache (
+    id CHAR(36) PRIMARY KEY,
+    tenant_id BIGINT UNSIGNED NOT NULL,
+    user_id BIGINT UNSIGNED NOT NULL,
+    logical_key CHAR(64) NOT NULL,
+    source_fingerprint CHAR(64) NOT NULL,
+    status VARCHAR(32) NOT NULL,
+    claim_token CHAR(32) NOT NULL DEFAULT '',
+    lease_until DATETIME(6) NULL,
+    valid_until DATETIME(6) NULL,
+    result_json MEDIUMBLOB NULL,
+    rendered_text MEDIUMTEXT NULL,
+    evidence_hash CHAR(64) NOT NULL DEFAULT '',
+    content_hash CHAR(64) NOT NULL DEFAULT '',
+    error_code VARCHAR(128) NOT NULL DEFAULT '',
+    created_at DATETIME(6) NOT NULL,
+    updated_at DATETIME(6) NOT NULL,
+    UNIQUE KEY uk_daily_review_identity (tenant_id,user_id,logical_key,source_fingerprint),
+    KEY idx_daily_review_owner_id (tenant_id,user_id,id),
+    KEY idx_daily_review_cleanup (status,valid_until,lease_until)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

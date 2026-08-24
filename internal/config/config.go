@@ -33,6 +33,7 @@ type Config struct {
 	Note            NoteConfig
 	Memory          MemoryConfig
 	Reminder        ReminderConfig
+	Skills          SkillConfig
 }
 
 type ModelConfig struct {
@@ -157,6 +158,15 @@ type ReminderConfig struct {
 	Timezone, ProductionDeliveryAdapter                                    string
 }
 
+type SkillConfig struct {
+	Enabled, DailyReviewEnabled                                                     bool
+	Timezone                                                                        string
+	MaxLookbackDays, MaxChatMessages, PerSessionMessages, MaxNotes, MaxContextChars int
+	MaxSteps, MaxModelCalls, MaxToolCalls, MaxRepairAttempts                        int
+	CacheTTL, CacheLease, CacheWait                                                 time.Duration
+	SkillVersion, SchemaVersion, PromptPolicyVersion                                string
+}
+
 type LoadOptions struct {
 	Path  string
 	Model string
@@ -177,6 +187,7 @@ type fileConfig struct {
 	Note            fileNoteConfig             `yaml:"NOTE"`
 	Memory          fileMemoryConfig           `yaml:"MEMORY"`
 	Reminder        fileReminderConfig         `yaml:"REMINDER"`
+	Skills          fileSkillConfig            `yaml:"SKILLS"`
 
 	// 保留原有单模型配置格式的兼容性。
 	ModelProvider string `yaml:"MODEL_PROVIDER"`
@@ -200,6 +211,27 @@ type fileAgentConfig struct {
 	MaxToolCalls                int     `yaml:"MAX_TOOL_CALLS"`
 	MaxRepairAttempts           int     `yaml:"MAX_REPAIR_ATTEMPTS"`
 	MaxOutputTokens             int     `yaml:"MAX_OUTPUT_TOKENS"`
+}
+
+type fileSkillConfig struct {
+	Enabled             bool   `yaml:"ENABLED"`
+	DailyReviewEnabled  bool   `yaml:"DAILY_REVIEW_ENABLED"`
+	Timezone            string `yaml:"TIMEZONE"`
+	MaxLookbackDays     int    `yaml:"MAX_LOOKBACK_DAYS"`
+	MaxChatMessages     int    `yaml:"MAX_CHAT_MESSAGES"`
+	PerSessionMessages  int    `yaml:"PER_SESSION_MESSAGES"`
+	MaxNotes            int    `yaml:"MAX_NOTES"`
+	MaxContextChars     int    `yaml:"MAX_CONTEXT_CHARS"`
+	MaxSteps            int    `yaml:"MAX_STEPS"`
+	MaxModelCalls       int    `yaml:"MAX_MODEL_CALLS"`
+	MaxToolCalls        int    `yaml:"MAX_TOOL_CALLS"`
+	MaxRepairAttempts   int    `yaml:"MAX_REPAIR_ATTEMPTS"`
+	CacheTTL            string `yaml:"CACHE_TTL"`
+	CacheLease          string `yaml:"CACHE_LEASE"`
+	CacheWait           string `yaml:"CACHE_WAIT"`
+	SkillVersion        string `yaml:"SKILL_VERSION"`
+	SchemaVersion       string `yaml:"SCHEMA_VERSION"`
+	PromptPolicyVersion string `yaml:"PROMPT_POLICY_VERSION"`
 }
 
 type fileResilienceConfig struct {
@@ -425,6 +457,18 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	skillCacheTTL, err := parseDuration("SKILL_CACHE_TTL", raw.Skills.CacheTTL)
+	if err != nil {
+		return Config{}, err
+	}
+	skillCacheLease, err := parseDuration("SKILL_CACHE_LEASE", raw.Skills.CacheLease)
+	if err != nil {
+		return Config{}, err
+	}
+	skillCacheWait, err := parseDuration("SKILL_CACHE_WAIT", raw.Skills.CacheWait)
+	if err != nil {
+		return Config{}, err
+	}
 
 	cfg := Config{
 		HTTPAddr:        strings.TrimSpace(raw.HTTPAddr),
@@ -486,6 +530,7 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 		Note:     NoteConfig{Enabled: raw.Note.Enabled, KBID: raw.Note.KBID},
 		Memory:   MemoryConfig{Enabled: raw.Memory.Enabled, RAGEnabled: raw.Memory.RAGEnabled, ProjectionEnabled: raw.Memory.ProjectionEnabled, WorkflowPilotEnabled: raw.Memory.WorkflowPilotEnabled, RecallMode: strings.TrimSpace(raw.Memory.RecallMode), StructuredPlanMinConfidence: raw.Memory.StructuredPlanMinConfidence, MaxRecallSelectors: raw.Memory.MaxRecallSelectors, MaxExactCandidates: raw.Memory.MaxExactCandidates, MaxCandidateTextChars: raw.Memory.MaxCandidateTextChars, MaxLLMResponseBytes: raw.Memory.MaxLLMResponseBytes, MaxLLMRepairAttempts: raw.Memory.MaxLLMRepairAttempts, DefaultSessionTTL: memorySessionTTL, RecallTarget: raw.Memory.RecallTarget, RecallPageSize: raw.Memory.RecallPageSize, MaxScanned: raw.Memory.MaxScanned, MaxBatches: raw.Memory.MaxBatches, MaxContextChars: raw.Memory.MaxContextChars, ConflictThreshold: raw.Memory.ConflictThreshold, ProjectionBatchSize: raw.Memory.ProjectionBatchSize, ProjectionBaseBackoff: projectionBaseBackoff, ProjectionMaxBackoff: projectionMaxBackoff, ProjectionMaxAttempts: raw.Memory.ProjectionMaxAttempts, RAGEndpoint: strings.TrimRight(strings.TrimSpace(raw.Memory.RAGEndpoint), "/"), RAGTimeout: memoryRAGTimeout, RAGServiceToken: strings.TrimSpace(raw.Memory.RAGServiceToken), OwnerClaimSecret: strings.TrimSpace(raw.Memory.OwnerClaimSecret), ProjectionVersion: strings.TrimSpace(raw.Memory.ProjectionVersion)},
 		Reminder: ReminderConfig{Enabled: raw.Reminder.Enabled, WorkflowPilotEnabled: raw.Reminder.WorkflowPilotEnabled, DispatcherEnabled: raw.Reminder.DispatcherEnabled, WorkerEnabled: raw.Reminder.WorkerEnabled, BatchSize: raw.Reminder.BatchSize, MaxBatches: raw.Reminder.MaxBatches, MaxAttempts: raw.Reminder.MaxAttempts, LeaseDuration: reminderLease, Interval: reminderInterval, MaxHorizon: reminderHorizon, RetryBaseBackoff: reminderRetryBase, RetryMaxBackoff: reminderRetryMax, Timezone: strings.TrimSpace(raw.Reminder.Timezone), ProductionDeliveryAdapter: strings.TrimSpace(raw.Reminder.ProductionDeliveryAdapter)},
+		Skills:   SkillConfig{Enabled: raw.Skills.Enabled, DailyReviewEnabled: raw.Skills.DailyReviewEnabled, Timezone: strings.TrimSpace(raw.Skills.Timezone), MaxLookbackDays: raw.Skills.MaxLookbackDays, MaxChatMessages: raw.Skills.MaxChatMessages, PerSessionMessages: raw.Skills.PerSessionMessages, MaxNotes: raw.Skills.MaxNotes, MaxContextChars: raw.Skills.MaxContextChars, MaxSteps: raw.Skills.MaxSteps, MaxModelCalls: raw.Skills.MaxModelCalls, MaxToolCalls: raw.Skills.MaxToolCalls, MaxRepairAttempts: raw.Skills.MaxRepairAttempts, CacheTTL: skillCacheTTL, CacheLease: skillCacheLease, CacheWait: skillCacheWait, SkillVersion: strings.TrimSpace(raw.Skills.SkillVersion), SchemaVersion: strings.TrimSpace(raw.Skills.SchemaVersion), PromptPolicyVersion: strings.TrimSpace(raw.Skills.PromptPolicyVersion)},
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -545,6 +590,25 @@ func (c Config) Validate() error {
 	}
 	if err := c.Reminder.Validate(c.Database.Enabled, c.Auth.Enabled, c.Memory.Enabled); err != nil {
 		return err
+	}
+	if err := c.Skills.Validate(c.Agent.EnableIntentRouting, c.Database.Enabled, c.Auth.Enabled, c.Memory.Enabled); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c SkillConfig) Validate(intentRouting, databaseEnabled, authEnabled, memoryEnabled bool) error {
+	if c.Timezone != "Asia/Shanghai" || c.MaxLookbackDays < 1 || c.MaxLookbackDays > 366 || c.MaxChatMessages < 1 || c.MaxChatMessages > 1000 || c.PerSessionMessages < 1 || c.PerSessionMessages > c.MaxChatMessages || c.MaxNotes < 1 || c.MaxNotes > 500 || c.MaxContextChars < 1 || c.MaxSteps < 9 || c.MaxModelCalls < 1 || c.MaxToolCalls < 2 || c.MaxRepairAttempts < 0 || c.MaxRepairAttempts > 2 || c.CacheTTL <= 0 || c.CacheLease <= 0 || c.CacheWait <= 0 || c.CacheWait > c.CacheLease || c.SkillVersion == "" || c.SchemaVersion == "" || c.PromptPolicyVersion == "" {
+		return errors.New("SKILLS limits, versions, durations or timezone are invalid")
+	}
+	if c.DailyReviewEnabled && !c.Enabled {
+		return errors.New("DAILY_REVIEW_ENABLED requires SKILLS_ENABLED")
+	}
+	if c.Enabled && (!intentRouting || !databaseEnabled || !authEnabled) {
+		return errors.New("SKILLS require intent routing, DATABASE and AUTH")
+	}
+	if c.DailyReviewEnabled && !memoryEnabled {
+		return errors.New("daily review requires MEMORY")
 	}
 	return nil
 }
@@ -758,6 +822,7 @@ func defaultFileConfig() fileConfig {
 		Auth:     fileAuthConfig{SessionTTL: "168h", CookieName: "note_agent_session"},
 		Memory:   fileMemoryConfig{RecallMode: "exact-only", StructuredPlanMinConfidence: .75, MaxRecallSelectors: 8, MaxExactCandidates: 40, MaxCandidateTextChars: 16000, MaxLLMResponseBytes: 16384, MaxLLMRepairAttempts: 1, DefaultSessionTTL: "24h", RecallTarget: 10, RecallPageSize: 20, MaxScanned: 200, MaxBatches: 10, MaxContextChars: 12000, ConflictThreshold: .8, ProjectionBatchSize: 50, ProjectionBaseBackoff: "1s", ProjectionMaxBackoff: "5m", ProjectionMaxAttempts: 8, RAGTimeout: "10s", ProjectionVersion: "v1"},
 		Reminder: fileReminderConfig{BatchSize: 20, MaxBatches: 5, MaxAttempts: 8, LeaseDuration: "30s", Interval: "1s", MaxHorizon: "8760h", RetryBaseBackoff: "1s", RetryMaxBackoff: "5m", Timezone: "Asia/Shanghai"},
+		Skills:   fileSkillConfig{Timezone: "Asia/Shanghai", MaxLookbackDays: 31, MaxChatMessages: 200, PerSessionMessages: 50, MaxNotes: 100, MaxContextChars: 24000, MaxSteps: 9, MaxModelCalls: 1, MaxToolCalls: 2, MaxRepairAttempts: 1, CacheTTL: "24h", CacheLease: "2m", CacheWait: "30s", SkillVersion: "v1", SchemaVersion: "v1", PromptPolicyVersion: "v1"},
 	}
 }
 
@@ -858,6 +923,13 @@ func applyServiceEnvironment(raw *fileConfig) error {
 		"REMINDER_RETRY_MAX_BACKOFF":           &raw.Reminder.RetryMaxBackoff,
 		"REMINDER_TIMEZONE":                    &raw.Reminder.Timezone,
 		"REMINDER_PRODUCTION_DELIVERY_ADAPTER": &raw.Reminder.ProductionDeliveryAdapter,
+		"SKILL_TIMEZONE":                       &raw.Skills.Timezone,
+		"SKILL_CACHE_TTL":                      &raw.Skills.CacheTTL,
+		"SKILL_CACHE_LEASE":                    &raw.Skills.CacheLease,
+		"SKILL_CACHE_WAIT":                     &raw.Skills.CacheWait,
+		"DAILY_REVIEW_SKILL_VERSION":           &raw.Skills.SkillVersion,
+		"DAILY_REVIEW_SCHEMA_VERSION":          &raw.Skills.SchemaVersion,
+		"DAILY_REVIEW_PROMPT_POLICY_VERSION":   &raw.Skills.PromptPolicyVersion,
 	})
 	for key, target := range map[string]*bool{
 		"DATABASE_ENABLED":                &raw.Database.Enabled,
@@ -876,6 +948,8 @@ func applyServiceEnvironment(raw *fileConfig) error {
 		"REMINDER_WORKFLOW_PILOT_ENABLED": &raw.Reminder.WorkflowPilotEnabled,
 		"REMINDER_DISPATCHER_ENABLED":     &raw.Reminder.DispatcherEnabled,
 		"REMINDER_WORKER_ENABLED":         &raw.Reminder.WorkerEnabled,
+		"SKILLS_ENABLED":                  &raw.Skills.Enabled,
+		"DAILY_REVIEW_ENABLED":            &raw.Skills.DailyReviewEnabled,
 	} {
 		if err := applyBoolEnvironment(key, target); err != nil {
 			return err
@@ -910,39 +984,48 @@ func applyServiceEnvironment(raw *fileConfig) error {
 		raw.RAG.KBIDs = ids
 	}
 	for key, target := range map[string]*int{
-		"AGENT_MAX_ITERATIONS":            &raw.Agent.MaxIterations,
-		"AGENT_MAX_MODEL_CALLS":           &raw.Agent.MaxModelCalls,
-		"AGENT_MAX_TOOL_CALLS":            &raw.Agent.MaxToolCalls,
-		"AGENT_MAX_REPAIR_ATTEMPTS":       &raw.Agent.MaxRepairAttempts,
-		"AGENT_MAX_OUTPUT_TOKENS":         &raw.Agent.MaxOutputTokens,
-		"INTENT_COMPLEX_THRESHOLD":        &raw.Agent.IntentComplexThreshold,
-		"MODEL_MAX_ATTEMPTS":              &raw.Resilience.ModelMaxAttempts,
-		"RAG_MAX_ATTEMPTS":                &raw.Resilience.RAGMaxAttempts,
-		"MODEL_MAX_CONCURRENCY":           &raw.Resilience.ModelMaxConcurrency,
-		"RAG_MAX_CONCURRENCY":             &raw.Resilience.RAGMaxConcurrency,
-		"CIRCUIT_FAILURE_THRESHOLD":       &raw.Resilience.CircuitFailureThreshold,
-		"GROUNDING_MIN_RESULTS":           &raw.Grounding.MinResults,
-		"GROUNDING_MAX_CONTEXT_CHARS":     &raw.Grounding.MaxContextChars,
-		"DATABASE_MAX_OPEN_CONNS":         &raw.Database.MaxOpenConns,
-		"DATABASE_MAX_IDLE_CONNS":         &raw.Database.MaxIdleConns,
-		"CONTEXT_MAX_INPUT_TOKENS":        &raw.Context.MaxInputTokens,
-		"CONTEXT_MIN_RECENT_MESSAGES":     &raw.Context.MinRecentMessages,
-		"CONTEXT_MESSAGE_HISTORY_LIMIT":   &raw.Context.MessageHistoryLimit,
-		"MEMORY_RECALL_TARGET":            &raw.Memory.RecallTarget,
-		"MEMORY_RECALL_PAGE_SIZE":         &raw.Memory.RecallPageSize,
-		"MEMORY_MAX_SCANNED":              &raw.Memory.MaxScanned,
-		"MEMORY_MAX_BATCHES":              &raw.Memory.MaxBatches,
-		"MEMORY_MAX_CONTEXT_CHARS":        &raw.Memory.MaxContextChars,
-		"MEMORY_PROJECTION_BATCH_SIZE":    &raw.Memory.ProjectionBatchSize,
-		"MEMORY_PROJECTION_MAX_ATTEMPTS":  &raw.Memory.ProjectionMaxAttempts,
-		"MEMORY_MAX_RECALL_SELECTORS":     &raw.Memory.MaxRecallSelectors,
-		"MEMORY_MAX_EXACT_CANDIDATES":     &raw.Memory.MaxExactCandidates,
-		"MEMORY_MAX_CANDIDATE_TEXT_CHARS": &raw.Memory.MaxCandidateTextChars,
-		"MEMORY_MAX_LLM_RESPONSE_BYTES":   &raw.Memory.MaxLLMResponseBytes,
-		"MEMORY_MAX_LLM_REPAIR_ATTEMPTS":  &raw.Memory.MaxLLMRepairAttempts,
-		"REMINDER_BATCH_SIZE":             &raw.Reminder.BatchSize,
-		"REMINDER_MAX_BATCHES":            &raw.Reminder.MaxBatches,
-		"REMINDER_MAX_ATTEMPTS":           &raw.Reminder.MaxAttempts,
+		"AGENT_MAX_ITERATIONS":              &raw.Agent.MaxIterations,
+		"AGENT_MAX_MODEL_CALLS":             &raw.Agent.MaxModelCalls,
+		"AGENT_MAX_TOOL_CALLS":              &raw.Agent.MaxToolCalls,
+		"AGENT_MAX_REPAIR_ATTEMPTS":         &raw.Agent.MaxRepairAttempts,
+		"AGENT_MAX_OUTPUT_TOKENS":           &raw.Agent.MaxOutputTokens,
+		"INTENT_COMPLEX_THRESHOLD":          &raw.Agent.IntentComplexThreshold,
+		"MODEL_MAX_ATTEMPTS":                &raw.Resilience.ModelMaxAttempts,
+		"RAG_MAX_ATTEMPTS":                  &raw.Resilience.RAGMaxAttempts,
+		"MODEL_MAX_CONCURRENCY":             &raw.Resilience.ModelMaxConcurrency,
+		"RAG_MAX_CONCURRENCY":               &raw.Resilience.RAGMaxConcurrency,
+		"CIRCUIT_FAILURE_THRESHOLD":         &raw.Resilience.CircuitFailureThreshold,
+		"GROUNDING_MIN_RESULTS":             &raw.Grounding.MinResults,
+		"GROUNDING_MAX_CONTEXT_CHARS":       &raw.Grounding.MaxContextChars,
+		"DATABASE_MAX_OPEN_CONNS":           &raw.Database.MaxOpenConns,
+		"DATABASE_MAX_IDLE_CONNS":           &raw.Database.MaxIdleConns,
+		"CONTEXT_MAX_INPUT_TOKENS":          &raw.Context.MaxInputTokens,
+		"CONTEXT_MIN_RECENT_MESSAGES":       &raw.Context.MinRecentMessages,
+		"CONTEXT_MESSAGE_HISTORY_LIMIT":     &raw.Context.MessageHistoryLimit,
+		"MEMORY_RECALL_TARGET":              &raw.Memory.RecallTarget,
+		"MEMORY_RECALL_PAGE_SIZE":           &raw.Memory.RecallPageSize,
+		"MEMORY_MAX_SCANNED":                &raw.Memory.MaxScanned,
+		"MEMORY_MAX_BATCHES":                &raw.Memory.MaxBatches,
+		"MEMORY_MAX_CONTEXT_CHARS":          &raw.Memory.MaxContextChars,
+		"MEMORY_PROJECTION_BATCH_SIZE":      &raw.Memory.ProjectionBatchSize,
+		"MEMORY_PROJECTION_MAX_ATTEMPTS":    &raw.Memory.ProjectionMaxAttempts,
+		"MEMORY_MAX_RECALL_SELECTORS":       &raw.Memory.MaxRecallSelectors,
+		"MEMORY_MAX_EXACT_CANDIDATES":       &raw.Memory.MaxExactCandidates,
+		"MEMORY_MAX_CANDIDATE_TEXT_CHARS":   &raw.Memory.MaxCandidateTextChars,
+		"MEMORY_MAX_LLM_RESPONSE_BYTES":     &raw.Memory.MaxLLMResponseBytes,
+		"MEMORY_MAX_LLM_REPAIR_ATTEMPTS":    &raw.Memory.MaxLLMRepairAttempts,
+		"REMINDER_BATCH_SIZE":               &raw.Reminder.BatchSize,
+		"REMINDER_MAX_BATCHES":              &raw.Reminder.MaxBatches,
+		"REMINDER_MAX_ATTEMPTS":             &raw.Reminder.MaxAttempts,
+		"SKILL_MAX_LOOKBACK_DAYS":           &raw.Skills.MaxLookbackDays,
+		"DAILY_REVIEW_MAX_CHAT_MESSAGES":    &raw.Skills.MaxChatMessages,
+		"DAILY_REVIEW_PER_SESSION_MESSAGES": &raw.Skills.PerSessionMessages,
+		"DAILY_REVIEW_MAX_NOTES":            &raw.Skills.MaxNotes,
+		"DAILY_REVIEW_MAX_CONTEXT_CHARS":    &raw.Skills.MaxContextChars,
+		"DAILY_REVIEW_MAX_STEPS":            &raw.Skills.MaxSteps,
+		"DAILY_REVIEW_MAX_MODEL_CALLS":      &raw.Skills.MaxModelCalls,
+		"DAILY_REVIEW_MAX_TOOL_CALLS":       &raw.Skills.MaxToolCalls,
+		"DAILY_REVIEW_MAX_REPAIR_ATTEMPTS":  &raw.Skills.MaxRepairAttempts,
 	} {
 		if err := applyIntEnvironment(key, target); err != nil {
 			return err

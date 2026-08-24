@@ -13,6 +13,7 @@ import (
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/chat"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/config"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/contextmanager"
+	"github.com/TowDaysZzz/HarnessLoopAgent/internal/dailyreview"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/intentexecutor"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/knowledgebase"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/mcpfacade"
@@ -22,6 +23,8 @@ import (
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/platform/mysqlstore"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/ragclient"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/routing"
+	"github.com/TowDaysZzz/HarnessLoopAgent/internal/runtime"
+	"github.com/TowDaysZzz/HarnessLoopAgent/internal/skill"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/tools"
 )
 
@@ -191,19 +194,43 @@ func run() error {
 				reminderQueryHandler = intentexecutor.ReminderQueryHandler{Service: reminderRuntime.Query, Limit: 20}
 			}
 		}
+		var skillRegistry *skill.Registry
+		var skillExecutor *skill.Executor
+		if cfg.Skills.Enabled {
+			definitions := []skill.Definition{}
+			if cfg.Skills.DailyReviewEnabled {
+				review := dailyreview.ReviewWorkflow{
+					Reader: dailyreview.ActivityReader{Chat: store, Notes: store, Memory: store}, Cache: store,
+					Memory:    dailyreview.RecallAdapter{Service: memoryRuntime.Recall, Candidates: store, Target: cfg.Memory.RecallTarget, MaxContextChars: cfg.Skills.MaxContextChars},
+					Generator: dailyreview.StructuredGenerator{Runner: agentRunner, MaxRepairs: cfg.Skills.MaxRepairAttempts, MaxOutputBytes: cfg.Memory.MaxLLMResponseBytes, Timeout: cfg.Agent.RunTimeout},
+					Config:    dailyreview.WorkflowConfig{Options: dailyreview.Options{MaxChatMessages: cfg.Skills.MaxChatMessages, PerSession: cfg.Skills.PerSessionMessages, MaxNotes: cfg.Skills.MaxNotes, IncludeMemory: true}, CacheTTL: cfg.Skills.CacheTTL, CacheLease: cfg.Skills.CacheLease, CacheWait: cfg.Skills.CacheWait, MaxSteps: cfg.Skills.MaxSteps, MaxModelCalls: cfg.Skills.MaxModelCalls, MaxToolCalls: cfg.Skills.MaxToolCalls, OutputSchemaVersion: cfg.Skills.SchemaVersion, PromptPolicyVersion: cfg.Skills.PromptPolicyVersion},
+					Harness:   &runtime.Metrics{},
+				}
+				definitions = append(definitions, skill.Definition{ID: "daily_review", Version: skill.Version(cfg.Skills.SkillVersion), Mode: skill.ModeWorkflow, Risk: skill.RiskReadOnly, Dependencies: []skill.Dependency{"chat", "notes", "memory", "model"}, Budget: skill.Budget{Timeout: cfg.Agent.RunTimeout, MaxSteps: cfg.Skills.MaxSteps, MaxModelCalls: cfg.Skills.MaxModelCalls, MaxToolCalls: cfg.Skills.MaxToolCalls, MaxContextBytes: cfg.Skills.MaxContextChars, MaxOutputBytes: cfg.Memory.MaxLLMResponseBytes * 2}, Matcher: dailyreview.Matcher{Timezone: cfg.Skills.Timezone, MaxLookbackDays: cfg.Skills.MaxLookbackDays}, InputCodec: dailyreview.PlanCodec{Timezone: cfg.Skills.Timezone}, OutputCodec: dailyreview.ReportCodec{}, Workflow: review})
+			}
+			skillRegistry, err = skill.NewRegistry(definitions, map[skill.Dependency]bool{"chat": true, "notes": true, "memory": memoryRuntime != nil && memoryRuntime.Recall != nil, "model": agentRunner != nil})
+			if err != nil {
+				return err
+			}
+			skillExecutor, err = skill.NewExecutor(skillRegistry)
+			if err != nil {
+				return err
+			}
+		}
 		executor, err := routing.NewFacade(routing.HandlerSet{
 			NoteCreate: noteCreateHandler, Clarification: routing.ClarificationHandler{}, DeleteRejected: routing.DeleteRejectedHandler{},
 			MemoryCapture: memoryCaptureHandler, MemoryRecall: memoryRecallHandler,
 			ReminderCreate: reminderCommandHandler, ReminderUpdate: reminderCommandHandler, ReminderCancel: reminderCommandHandler, ReminderQuery: reminderQueryHandler,
 			SimpleChat: routing.ConversationHandler{Runner: agentRunner}, SimpleNoteQuery: routing.ConversationHandler{Runner: agentRunner},
 			ComplexChat: complexHandler, ComplexNoteQuery: complexHandler,
+			Skills: skillExecutor,
 		})
 		if err != nil {
 			return err
 		}
 		intentRouter := routing.Router{Classifier: routing.Classifier{
 			ComplexThreshold: cfg.Agent.IntentComplexThreshold, MinWriteConfidence: cfg.Agent.IntentMinWriteConfidence,
-		}, Drafts: draftService}
+		}, Drafts: draftService, Skills: skillRegistry, MinSkillConfidence: .9}
 		chatService, err := chat.NewService(ctx, store, agentRunner, assembler, chat.ServiceOptions{
 			MessageHistoryLimit: cfg.Context.MessageHistoryLimit, DefaultModel: cfg.ActiveModel,
 			EnableIntentRouting: cfg.Agent.EnableIntentRouting, EnableLegacyRoutingFallback: cfg.Agent.EnableLegacyRoutingFallback,

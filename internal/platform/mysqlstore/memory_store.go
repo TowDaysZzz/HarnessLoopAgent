@@ -191,6 +191,9 @@ func (s *Store) CommitMutation(ctx context.Context, m memory.Mutation) (result m
 		if err := tx.Create(&memoryEventRow{ID: uuid.NewString(), TenantID: m.Owner.TenantID, UserID: m.Owner.UserID, MemoryID: value.ID, EventType: eventType, OldStatus: oldStatus, NewStatus: string(value.Status), Actor: actor, ReasonCode: reason, ExecutionID: m.IdempotencyKey, InputHash: m.InputHash, ResultMemoryID: value.ID, OccurredAt: now}).Error; err != nil {
 			return mapMemoryWriteError(err)
 		}
+		if err := bumpMemoryMutationVersion(tx, m.Owner, now); err != nil {
+			return err
+		}
 		result = memory.MutationResult{Memory: value, Relations: append([]memory.Relation(nil), m.Relations...)}
 		return nil
 	})
@@ -279,6 +282,9 @@ func (s *Store) TransitionMemory(ctx context.Context, owner memory.Owner, id str
 		if err := tx.Create(&memoryEventRow{ID: uuid.NewString(), TenantID: owner.TenantID, UserID: owner.UserID, MemoryID: id, EventType: string(to), OldStatus: stringPtr(string(old)), NewStatus: string(to), Actor: actor, ReasonCode: reason, ExecutionID: key, InputHash: inputHash, ResultMemoryID: id, OccurredAt: now}).Error; err != nil {
 			return mapMemoryWriteError(err)
 		}
+		if err := bumpMemoryMutationVersion(tx, owner, now); err != nil {
+			return err
+		}
 		result = memory.MutationResult{Memory: value}
 		return nil
 	})
@@ -350,6 +356,9 @@ func (s *Store) ActivateCandidateSuperseding(ctx context.Context, a memory.Candi
 		if err := tx.Create(&events).Error; err != nil {
 			return mapMemoryWriteError(err)
 		}
+		if err := bumpMemoryMutationVersion(tx, a.Owner, now); err != nil {
+			return err
+		}
 		relation := memory.Relation{FromID: candidate.ID, ToID: target.ID, Type: memory.RelationSupersedes, ReasonCode: reason}
 		result = memory.MutationResult{Memory: candidate, Relations: []memory.Relation{relation}}
 		return nil
@@ -383,10 +392,51 @@ func (s *Store) Expire(ctx context.Context, owner memory.Owner, now time.Time, l
 				return mapMemoryWriteError(err)
 			}
 		}
+		if len(rows) > 0 {
+			if err := bumpMemoryMutationVersion(tx, owner, now); err != nil {
+				return err
+			}
+		}
 		count = len(rows)
 		return nil
 	})
 	return
+}
+
+func bumpMemoryMutationVersion(tx *gorm.DB, owner memory.Owner, now time.Time) error {
+	return tx.Exec(`INSERT INTO memory_mutation_versions (tenant_id,user_id,mutation_version,updated_at) VALUES (?,?,1,?) ON DUPLICATE KEY UPDATE mutation_version=mutation_version+1,updated_at=VALUES(updated_at)`, owner.TenantID, owner.UserID, now.UTC()).Error
+}
+
+func (s *Store) MutationVersion(ctx context.Context, owner memory.Owner) (uint64, error) {
+	if !owner.Valid() {
+		return 0, memory.ErrInvalidInput
+	}
+	var row memoryMutationVersionRow
+	err := s.db.WithContext(ctx).Where("tenant_id=? AND user_id=?", owner.TenantID, owner.UserID).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return 0, nil
+	}
+	return row.MutationVersion, err
+}
+
+func (s *Store) ListActiveContextRefs(ctx context.Context, owner memory.Owner, kinds []memory.Kind, now time.Time, limit int) ([]memory.MemoryRef, error) {
+	if !owner.Valid() || limit < 1 || limit > 100 || len(kinds) == 0 || len(kinds) > 8 {
+		return nil, memory.ErrInvalidInput
+	}
+	values := make([]string, 0, len(kinds))
+	for _, kind := range kinds {
+		values = append(values, string(kind))
+	}
+	var rows []memoryRecordRow
+	err := s.db.WithContext(ctx).Select("id,lineage_version,content_hash").Where("tenant_id=? AND user_id=? AND status='active' AND kind IN ? AND (expires_at IS NULL OR expires_at>?)", owner.TenantID, owner.UserID, values, now).Order("salience DESC,updated_at DESC,id").Limit(limit).Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	refs := make([]memory.MemoryRef, 0, len(rows))
+	for _, row := range rows {
+		refs = append(refs, memory.MemoryRef{ID: row.ID, LineageVersion: row.LineageVersion, ContentHash: row.ContentHash})
+	}
+	return refs, nil
 }
 
 func (s *Store) ClaimProjections(ctx context.Context, limit int, now time.Time) (out []memory.Projection, err error) {

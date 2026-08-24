@@ -13,6 +13,7 @@ import (
 	agentauth "github.com/TowDaysZzz/HarnessLoopAgent/internal/auth"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/contextmanager"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/routing"
+	"github.com/TowDaysZzz/HarnessLoopAgent/internal/skill"
 )
 
 type fakeIntentRouter struct {
@@ -34,6 +35,23 @@ type fakeIntentExecutor struct {
 	input  routing.Input
 	events []agent.Event
 	err    error
+}
+
+type cancellingSkillExecutor struct {
+	started chan struct{}
+	input   routing.Input
+}
+
+func (e *cancellingSkillExecutor) Execute(ctx context.Context, input routing.Input) (routing.Execution, error) {
+	e.input = input
+	out := make(chan agent.Event, 2)
+	go func() {
+		defer close(out)
+		close(e.started)
+		<-ctx.Done()
+		out <- agent.Event{Type: agent.EventRunFailed, Err: ctx.Err()}
+	}()
+	return routing.Execution{Handler: "skill:daily_review", Events: out}, nil
 }
 
 func (e *fakeIntentExecutor) Execute(_ context.Context, input routing.Input) (routing.Execution, error) {
@@ -191,6 +209,116 @@ func TestServiceRoutesOnceAndPersistsSafeExecutorLifecycle(t *testing.T) {
 	}
 	if events[2].Data["intent"] != routing.IntentNoteCreate || events[2].Data["complexity"] != routing.ComplexitySimple {
 		t.Fatalf("route event = %#v", events[2])
+	}
+}
+
+func TestServicePersistsSkillInvocationAndTerminalStatus(t *testing.T) {
+	args, hash, err := skill.NormalizeArguments([]byte(`{"date":"2026-08-24","timezone":"Asia/Shanghai"}`), 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision := routing.RouteDecision{Target: routing.TargetSkill, Intent: routing.IntentSkillInvoke, Complexity: routing.ComplexitySimple, Deterministic: true, NeedsModel: true, Confidence: .99, Reason: "daily_review", Skill: &routing.SkillTarget{ID: "daily_review", Version: "v1", Arguments: args, ArgumentsHash: hash}}
+	executor := &fakeIntentExecutor{events: []agent.Event{{Type: skill.EventStarted, Delta: "daily_review"}, {Type: skill.EventCache, Delta: "miss"}, {Type: skill.EventStep, Delta: "resolve_window"}, {Type: agent.EventTextDelta, Delta: "今日回顾"}, {Type: agent.EventRunCompleted}}}
+	service, repo := newRoutedTestService(t, &recordingRunner{}, &fakeIntentRouter{decision: decision}, executor, false)
+	ctx := agentauth.WithPrincipal(context.Background(), agentauth.Principal{UserID: 7, TenantID: 9})
+	session, _ := service.CreateSession(ctx, "skill")
+	created, err := service.CreateRun(ctx, CreateRunInput{SessionID: session.ID, Content: "回顾今天", IdempotencyKey: "daily-review"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForStatusContext(t, service, ctx, created.Run.ID, RunCompleted)
+	if executor.input.Run.SkillInvocation == nil {
+		t.Fatal("missing skill invocation in trusted run context")
+	}
+	stored, err := repo.GetInvocation(context.Background(), skill.Owner{TenantID: 9, UserID: 7}, executor.input.Run.SkillInvocation.ID)
+	if err != nil || stored.Status != skill.InvocationCompleted {
+		t.Fatalf("invocation=%#v err=%v", stored, err)
+	}
+	events, _ := service.ListEvents(ctx, created.Run.ID, 0, 100)
+	if !hasEventType(events, "skill.started") || !hasEventType(events, "skill.cache") || !hasEventType(events, "skill.step") || events[2].Data["arguments_hash"] != hash {
+		t.Fatalf("events=%#v", events)
+	}
+	if encoded := fmt.Sprint(events); strings.Contains(encoded, "Asia/Shanghai") {
+		t.Fatalf("route events leaked arguments: %s", encoded)
+	}
+}
+
+func TestServiceMarksSkillInvocationFailedWithChatRun(t *testing.T) {
+	args, hash, err := skill.NormalizeArguments([]byte(`{"date":"2026-08-24"}`), 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision := routing.RouteDecision{Target: routing.TargetSkill, Intent: routing.IntentSkillInvoke, Complexity: routing.ComplexitySimple, Confidence: .99, Reason: "daily_review", Skill: &routing.SkillTarget{ID: "daily_review", Version: "v1", Arguments: args, ArgumentsHash: hash}}
+	executor := &fakeIntentExecutor{events: []agent.Event{{Type: skill.EventStarted, Delta: "daily_review"}, {Type: agent.EventRunFailed, Err: errors.New("generation failed")}}}
+	service, repo := newRoutedTestService(t, &recordingRunner{}, &fakeIntentRouter{decision: decision}, executor, false)
+	ctx := agentauth.WithPrincipal(context.Background(), agentauth.Principal{UserID: 17, TenantID: 19})
+	session, _ := service.CreateSession(ctx, "skill failure")
+	created, err := service.CreateRun(ctx, CreateRunInput{SessionID: session.ID, Content: "回顾今天", IdempotencyKey: "daily-review-failure"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForStatusContext(t, service, ctx, created.Run.ID, RunFailed)
+	if executor.input.Run.SkillInvocation == nil {
+		t.Fatal("missing skill invocation")
+	}
+	stored, err := repo.GetInvocation(ctx, skill.Owner{TenantID: 19, UserID: 17}, executor.input.Run.SkillInvocation.ID)
+	if err != nil || stored.Status != skill.InvocationFailed {
+		t.Fatalf("invocation=%#v err=%v", stored, err)
+	}
+}
+
+func TestServiceCancellationMarksSkillInvocationCancelled(t *testing.T) {
+	args, hash, _ := skill.NormalizeArguments([]byte(`{"date":"2026-08-24"}`), 4096)
+	decision := routing.RouteDecision{Target: routing.TargetSkill, Intent: routing.IntentSkillInvoke, Skill: &routing.SkillTarget{ID: "daily_review", Version: "v1", Arguments: args, ArgumentsHash: hash}}
+	repo := NewMemoryRepository()
+	executor := &cancellingSkillExecutor{started: make(chan struct{})}
+	service, err := NewService(context.Background(), repo, &recordingRunner{}, contextmanager.NewBoundedAssembler(1000, 2, contextmanager.ApproxTokenCounter{}), ServiceOptions{MessageHistoryLimit: 100, DefaultModel: "test", EnableIntentRouting: true, Router: &fakeIntentRouter{decision: decision}, Executor: executor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := agentauth.WithPrincipal(context.Background(), agentauth.Principal{TenantID: 31, UserID: 32})
+	session, _ := service.CreateSession(ctx, "cancel skill")
+	created, err := service.CreateRun(ctx, CreateRunInput{SessionID: session.ID, Content: "回顾今天", IdempotencyKey: "cancel-skill"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-executor.started:
+	case <-time.After(time.Second):
+		t.Fatal("skill did not start")
+	}
+	if _, err := service.CancelRun(ctx, created.Run.ID); err != nil {
+		t.Fatal(err)
+	}
+	waitForStatusContext(t, service, ctx, created.Run.ID, RunCancelled)
+	if executor.input.Run.SkillInvocation == nil {
+		t.Fatal("missing invocation")
+	}
+	var stored skill.Invocation
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		stored, _ = repo.GetInvocation(ctx, skill.Owner{TenantID: 31, UserID: 32}, executor.input.Run.SkillInvocation.ID)
+		if stored.Status == skill.InvocationCancelled {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if stored.Status != skill.InvocationCancelled {
+		t.Fatalf("invocation=%#v", stored)
+	}
+}
+
+func TestServiceDoesNotPersistInvocationForBuiltinChat(t *testing.T) {
+	executor := &fakeIntentExecutor{events: []agent.Event{{Type: agent.EventTextDelta, Delta: "hello"}, {Type: agent.EventRunCompleted}}}
+	service, repo := newRoutedTestService(t, &recordingRunner{}, &fakeIntentRouter{decision: routing.RouteDecision{Target: routing.TargetBuiltin, Intent: routing.IntentChat, Complexity: routing.ComplexitySimple}}, executor, false)
+	session, _ := service.CreateSession(context.Background(), "chat")
+	created, _ := service.CreateRun(context.Background(), CreateRunInput{SessionID: session.ID, Content: "hello", IdempotencyKey: "builtin"})
+	waitForStatus(t, service, created.Run.ID, RunCompleted)
+	repo.mu.Lock()
+	count := len(repo.invocations)
+	repo.mu.Unlock()
+	if count != 0 {
+		t.Fatalf("builtin invocation count=%d", count)
 	}
 }
 

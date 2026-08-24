@@ -52,9 +52,16 @@ func TestMemoryMigrationAndRepositoryLifecycle(t *testing.T) {
 	if err != nil || created.Memory.ID != value.ID {
 		t.Fatalf("CommitMutation=%+v err=%v", created, err)
 	}
+	versionAfterCreate, err := store.MutationVersion(ctx, owner)
+	if err != nil || versionAfterCreate == 0 {
+		t.Fatalf("mutation version=%d err=%v", versionAfterCreate, err)
+	}
 	replay, err := store.CommitMutation(ctx, mutation)
 	if err != nil || !replay.Replayed || replay.Memory.ID != value.ID {
 		t.Fatalf("replay=%+v err=%v", replay, err)
+	}
+	if version, _ := store.MutationVersion(ctx, owner); version != versionAfterCreate {
+		t.Fatalf("replay advanced mutation version=%d", version)
 	}
 	mutation.InputHash = stringsOf('a', 64)
 	if _, err := store.CommitMutation(ctx, mutation); !errors.Is(err, memory.ErrIdempotencyConflict) {
@@ -102,6 +109,7 @@ func TestMemoryAtomicSupersedeAndConcurrentVersion(t *testing.T) {
 	if _, err := store.CommitMutation(ctx, memory.Mutation{Owner: owner, NewMemory: &old, IdempotencyKey: uuid.NewString(), InputHash: old.ContentHash, OccurredAt: now}); err != nil {
 		t.Fatal(err)
 	}
+	beforeFailed, _ := store.MutationVersion(ctx, owner)
 	failed := integrationMemory(t, owner, memory.StatusActive, slot, now.Add(time.Second))
 	failed.LineageID = old.LineageID
 	failed.LineageVersion = 2
@@ -109,6 +117,9 @@ func TestMemoryAtomicSupersedeAndConcurrentVersion(t *testing.T) {
 	_, err := store.CommitMutation(ctx, memory.Mutation{Owner: owner, NewMemory: &failed, Targets: []memory.MutationTarget{{ID: old.ID, ExpectedRowVersion: 1, NewStatus: memory.StatusSuperseded}}, Relations: []memory.Relation{{FromID: failed.ID, ToID: uuid.NewString(), Type: memory.RelationSupersedes}}, IdempotencyKey: uuid.NewString(), InputHash: failed.ContentHash, OccurredAt: now.Add(time.Second)})
 	if err == nil {
 		t.Fatal("expected relation FK failure")
+	}
+	if afterFailed, _ := store.MutationVersion(ctx, owner); afterFailed != beforeFailed {
+		t.Fatalf("rolled back mutation advanced version: %d -> %d", beforeFailed, afterFailed)
 	}
 	stillOld, _ := store.BatchGet(ctx, owner, []string{old.ID, failed.ID})
 	if len(stillOld) != 1 || stillOld[0].Status != memory.StatusActive {

@@ -2,10 +2,12 @@ package routing
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"time"
 
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/reminder"
+	"github.com/TowDaysZzz/HarnessLoopAgent/internal/skill"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/workflow"
 )
 
@@ -21,9 +23,24 @@ const (
 	IntentReminderQuery  DomainIntent = "reminder.query"
 	IntentReminderUpdate DomainIntent = "reminder.update"
 	IntentReminderCancel DomainIntent = "reminder.cancel"
+	IntentSkillInvoke    DomainIntent = "skill.invoke"
 	IntentChat           DomainIntent = "chat"
 	IntentUnclear        DomainIntent = "intent.unclear"
 )
+
+type TargetKind string
+
+const (
+	TargetBuiltin TargetKind = "builtin"
+	TargetSkill   TargetKind = "skill"
+)
+
+type SkillTarget struct {
+	ID            skill.ID        `json:"id"`
+	Version       skill.Version   `json:"version"`
+	Arguments     json.RawMessage `json:"-"`
+	ArgumentsHash string          `json:"arguments_hash"`
+}
 
 type Complexity string
 
@@ -33,6 +50,8 @@ const (
 )
 
 type RouteDecision struct {
+	Target        TargetKind   `json:"target"`
+	Skill         *SkillTarget `json:"skill,omitempty"`
 	Intent        DomainIntent `json:"intent"`
 	Complexity    Complexity   `json:"complexity"`
 	Deterministic bool         `json:"deterministic"`
@@ -41,6 +60,8 @@ type RouteDecision struct {
 	Confidence    float64      `json:"confidence"`
 	Reason        string       `json:"reason"`
 }
+
+func (d RouteDecision) IsSkill() bool { return d.Target == TargetSkill && d.Skill != nil }
 
 type Classifier struct {
 	ComplexThreshold   int
@@ -159,6 +180,7 @@ type RunContext struct {
 	AccessToken      string
 	KnowledgeBaseIDs []uint64
 	Decision         RouteDecision
+	SkillInvocation  *skill.Invocation
 }
 
 type Executor interface {

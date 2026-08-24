@@ -17,6 +17,7 @@ import (
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/ragclient"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/routing"
 	agentruntime "github.com/TowDaysZzz/HarnessLoopAgent/internal/runtime"
+	"github.com/TowDaysZzz/HarnessLoopAgent/internal/skill"
 )
 
 type IntentRouter interface {
@@ -34,17 +35,19 @@ type ServiceOptions struct {
 	EnableLegacyRoutingFallback bool
 	Router                      IntentRouter
 	Executor                    IntentExecutor
+	SkillInvocations            skill.InvocationRepository
 }
 
 type Service struct {
-	root      context.Context
-	repo      Repository
-	runner    agent.ConversationRunner
-	assembler contextmanager.Assembler
-	router    IntentRouter
-	executor  IntentExecutor
-	notifier  *Notifier
-	options   ServiceOptions
+	root             context.Context
+	repo             Repository
+	runner           agent.ConversationRunner
+	assembler        contextmanager.Assembler
+	router           IntentRouter
+	executor         IntentExecutor
+	skillInvocations skill.InvocationRepository
+	notifier         *Notifier
+	options          ServiceOptions
 
 	mu      sync.Mutex
 	cancels map[string]context.CancelFunc
@@ -60,7 +63,11 @@ func NewService(root context.Context, repo Repository, runner agent.Conversation
 	service := &Service{
 		root: root, repo: repo, runner: runner, assembler: assembler,
 		router: options.Router, executor: options.Executor,
-		notifier: NewNotifier(), options: options, cancels: make(map[string]context.CancelFunc),
+		skillInvocations: options.SkillInvocations,
+		notifier:         NewNotifier(), options: options, cancels: make(map[string]context.CancelFunc),
+	}
+	if service.skillInvocations == nil {
+		service.skillInvocations, _ = repo.(skill.InvocationRepository)
 	}
 	if options.EnableIntentRouting && (service.router == nil || service.executor == nil) {
 		return nil, errors.New("intent routing requires router and executor")
@@ -237,8 +244,9 @@ func (s *Service) execute(runID string, owner Owner, userAccessToken string, kno
 	}
 
 	var stream <-chan agent.Event
+	var invocation *skill.Invocation
 	handlerName := "legacy"
-	decision := routing.RouteDecision{Intent: routing.IntentChat, Complexity: routing.ComplexitySimple, NeedsModel: true, Confidence: 1, Reason: "legacy_routing_disabled"}
+	decision := routing.RouteDecision{Target: routing.TargetBuiltin, Intent: routing.IntentChat, Complexity: routing.ComplexitySimple, NeedsModel: true, Confidence: 1, Reason: "legacy_routing_disabled"}
 	if s.options.EnableIntentRouting {
 		lastUserInput := ""
 		for index := len(contextResult.Messages) - 1; index >= 0; index-- {
@@ -250,6 +258,31 @@ func (s *Service) execute(runID string, owner Owner, userAccessToken string, kno
 		decision = s.router.Route(ctx, routing.RouteInput{
 			UserID: owner.UserID, TenantID: owner.TenantID, SessionID: run.SessionID, Content: lastUserInput,
 		})
+		if decision.IsSkill() {
+			if s.skillInvocations == nil {
+				s.fail(runID, RunFailed, "skill_invocation_store_unavailable", skill.ErrUnavailable)
+				return
+			}
+			createdInvocation, createErr := skill.NewInvocation(uuid.NewString(), skill.Owner{TenantID: owner.TenantID, UserID: owner.UserID}, run.SessionID, runID, skill.Ref{ID: decision.Skill.ID, Version: decision.Skill.Version}, decision.Skill.Arguments, time.Now().UTC())
+			if createErr != nil || createdInvocation.ArgumentsHash != decision.Skill.ArgumentsHash {
+				if createErr == nil {
+					createErr = skill.ErrInvalidInvocation
+				}
+				s.fail(runID, RunFailed, "invalid_skill_invocation", createErr)
+				return
+			}
+			stored, _, createErr := s.skillInvocations.CreateInvocation(ctx, createdInvocation)
+			if createErr != nil {
+				s.fail(runID, RunFailed, "persist_skill_invocation_failed", createErr)
+				return
+			}
+			stored, createErr = s.skillInvocations.TransitionInvocation(ctx, stored.Owner, stored.ID, skill.InvocationPending, skill.InvocationRunning, "", time.Now().UTC())
+			if createErr != nil {
+				s.fail(runID, RunFailed, "start_skill_invocation_failed", createErr)
+				return
+			}
+			invocation = &stored
+		}
 		if _, err := s.append(runID, "route.decided", routeEventMap(decision)); err != nil {
 			s.fail(runID, RunFailed, "persist_event_failed", err)
 			return
@@ -257,11 +290,12 @@ func (s *Service) execute(runID string, owner Owner, userAccessToken string, kno
 		execution, executeErr := s.executor.Execute(ctx, routing.Input{
 			Run: routing.RunContext{
 				RunID: runID, SessionID: run.SessionID, UserID: owner.UserID, TenantID: owner.TenantID,
-				AccessToken: userAccessToken, KnowledgeBaseIDs: append([]uint64(nil), knowledgeBaseIDs...), Decision: decision,
+				AccessToken: userAccessToken, KnowledgeBaseIDs: append([]uint64(nil), knowledgeBaseIDs...), Decision: decision, SkillInvocation: invocation,
 			},
 			Content: lastUserInput, Messages: contextResult.Messages,
 		})
 		if executeErr != nil {
+			s.finishSkillInvocation(invocation, skill.InvocationFailed, "executor_unavailable")
 			if !s.canLegacyFallback(decision) {
 				s.fail(runID, RunFailed, "executor_unavailable", executeErr)
 				return
@@ -280,6 +314,7 @@ func (s *Service) execute(runID string, owner Owner, userAccessToken string, kno
 	}
 
 	var answer strings.Builder
+	skillSuspended := false
 	for event := range stream {
 		switch event.Type {
 		case agent.EventTextDelta:
@@ -309,16 +344,45 @@ func (s *Service) execute(runID string, owner Owner, userAccessToken string, kno
 				s.fail(runID, RunFailed, "persist_event_failed", err)
 				return
 			}
+		case skill.EventStarted:
+			if _, err := s.append(runID, string(event.Type), map[string]any{"skill_id": event.Delta}); err != nil {
+				s.fail(runID, RunFailed, "persist_event_failed", err)
+				return
+			}
+		case skill.EventCache:
+			if _, err := s.append(runID, string(event.Type), map[string]any{"status": event.Delta}); err != nil {
+				s.fail(runID, RunFailed, "persist_event_failed", err)
+				return
+			}
+		case skill.EventStep:
+			if _, err := s.append(runID, string(event.Type), map[string]any{"step": event.Delta}); err != nil {
+				s.fail(runID, RunFailed, "persist_event_failed", err)
+				return
+			}
+		case skill.EventCandidate:
+			data := map[string]any{}
+			if err := json.Unmarshal([]byte(event.Delta), &data); err != nil {
+				s.finishSkillInvocation(invocation, skill.InvocationFailed, "invalid_candidate_event")
+				s.fail(runID, RunFailed, "invalid_candidate_event", err)
+				return
+			}
+			skillSuspended = event.Status == "suspended"
+			if _, err := s.append(runID, string(event.Type), data); err != nil {
+				s.fail(runID, RunFailed, "persist_event_failed", err)
+				return
+			}
 		case agent.EventRunFailed:
 			status := RunFailed
 			code := "agent_failed"
 			if errors.Is(event.Err, context.Canceled) {
+				s.finishSkillInvocation(invocation, skill.InvocationCancelled, "cancelled")
 				return
 			}
 			if errors.Is(event.Err, context.DeadlineExceeded) {
 				status, code = RunTimedOut, "run_timeout"
 			}
 			_, _ = s.append(runID, "executor.failed", executorEventMap(decision, handlerName, "failed", code, time.Since(executorStartedAt)))
+			s.finishSkillInvocation(invocation, skill.InvocationFailed, code)
 			s.fail(runID, status, code, event.Err)
 			return
 		case agent.EventRunCompleted:
@@ -333,23 +397,42 @@ func (s *Service) execute(runID string, owner Owner, userAccessToken string, kno
 			}
 			completed := Event{RunID: runID, Type: string(event.Type), Data: map[string]any{"status": RunCompleted}, CreatedAt: now}
 			if err := s.repo.CompleteRun(ctx, runID, assistant, completed); err != nil {
+				s.finishSkillInvocation(invocation, skill.InvocationFailed, "complete_run_failed")
 				s.fail(runID, RunFailed, "complete_run_failed", err)
 				return
+			}
+			if skillSuspended {
+				s.finishSkillInvocation(invocation, skill.InvocationSuspended, "")
+			} else {
+				s.finishSkillInvocation(invocation, skill.InvocationCompleted, "")
 			}
 			s.notifier.Notify(runID)
 			return
 		}
 	}
 	if errors.Is(ctx.Err(), context.Canceled) {
+		s.finishSkillInvocation(invocation, skill.InvocationCancelled, "cancelled")
 		return
 	}
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		_, _ = s.append(runID, "executor.failed", executorEventMap(decision, handlerName, "failed", "run_timeout", time.Since(executorStartedAt)))
 		s.fail(runID, RunTimedOut, "run_timeout", ctx.Err())
+		s.finishSkillInvocation(invocation, skill.InvocationFailed, "run_timeout")
 		return
 	}
 	_, _ = s.append(runID, "executor.failed", executorEventMap(decision, handlerName, "failed", "stream_closed", time.Since(executorStartedAt)))
 	s.fail(runID, RunFailed, "stream_closed", errors.New("agent stream closed without terminal event"))
+	s.finishSkillInvocation(invocation, skill.InvocationFailed, "stream_closed")
+}
+
+func (s *Service) finishSkillInvocation(invocation *skill.Invocation, target skill.InvocationStatus, code string) {
+	if invocation == nil || s.skillInvocations == nil || invocation.Status != skill.InvocationRunning {
+		return
+	}
+	updated, err := s.skillInvocations.TransitionInvocation(s.root, invocation.Owner, invocation.ID, skill.InvocationRunning, target, code, time.Now().UTC())
+	if err == nil {
+		*invocation = updated
+	}
 }
 
 func (s *Service) canLegacyFallback(decision routing.RouteDecision) bool {
@@ -361,10 +444,15 @@ func (s *Service) canLegacyFallback(decision routing.RouteDecision) bool {
 
 func routeEventMap(decision routing.RouteDecision) map[string]any {
 	value := routing.NewRouteEventData(decision)
-	return map[string]any{
+	data := map[string]any{
 		"intent": value.Intent, "complexity": value.Complexity, "confidence": value.Confidence,
 		"reason": value.Reason, "deterministic": value.Deterministic, "needs_rag": value.NeedsRAG, "needs_model": value.NeedsModel,
 	}
+	data["target"] = decision.Target
+	if decision.Skill != nil {
+		data["skill_id"], data["skill_version"], data["arguments_hash"] = decision.Skill.ID, decision.Skill.Version, decision.Skill.ArgumentsHash
+	}
+	return data
 }
 
 func executorEventMap(decision routing.RouteDecision, handler, status, errorCode string, duration time.Duration) map[string]any {

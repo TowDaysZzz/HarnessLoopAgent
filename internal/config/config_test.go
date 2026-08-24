@@ -510,6 +510,42 @@ func TestEnabledDatabaseRequiresDSN(t *testing.T) {
 	}
 }
 
+func TestSkillConfigDefaultsOffAndValidatesDependencies(t *testing.T) {
+	clearOverrides(t)
+	path := writeConfig(t, "MODEL_NAME: test\nMODEL_API_KEY: key\n")
+	cfg, err := LoadWithOptions(LoadOptions{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Skills.Enabled || cfg.Skills.DailyReviewEnabled || cfg.Skills.Timezone != "Asia/Shanghai" || cfg.Skills.MaxSteps != 9 {
+		t.Fatalf("skills defaults=%#v", cfg.Skills)
+	}
+	valid := cfg.Skills
+	valid.Enabled, valid.DailyReviewEnabled = true, true
+	if err := valid.Validate(true, true, true, true); err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range map[string]func(*SkillConfig){
+		"daily without skills": func(c *SkillConfig) { c.Enabled = false },
+		"bad quota":            func(c *SkillConfig) { c.PerSessionMessages = c.MaxChatMessages + 1 },
+		"bad lease":            func(c *SkillConfig) { c.CacheWait = c.CacheLease + time.Second },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := valid
+			mutate(&candidate)
+			if err := candidate.Validate(true, true, true, true); err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
+	}
+	if err := valid.Validate(false, true, true, true); err == nil {
+		t.Fatal("expected routing dependency error")
+	}
+	if err := valid.Validate(true, true, true, false); err == nil {
+		t.Fatal("expected memory dependency error")
+	}
+}
+
 func clearOverrides(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{

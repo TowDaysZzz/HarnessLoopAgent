@@ -14,7 +14,7 @@
 | 10 | Trace、指标、安全 | 部分实现 | Harness Observer、预算、熔断、Grounding 和 Metrics 已有；尚缺 OpenTelemetry/Prometheus 导出及完整审计 |
 | 11 | React/Vite 工作台 | 基础已实现 | `web` 提供认证、笔记和聊天最小工作台；尚缺生产构建接入与视觉回归 |
 | 12 | MCP Facade | 基础已实现 | `internal/mcpfacade` 提供 JSON-RPC tools/list、tools/call，已接入认证保护的 `POST /v1/mcp`；当前只注册 `notes.list` |
-| 13 | 复杂任务 Workflow | 接口骨架 | `internal/workflow` 提供有界步骤执行；尚未接入洞察类业务流程 |
+| 13 | 复杂任务 Workflow | Daily Review 已实现 | `internal/skill` 提供版本化注册与执行契约；每日回顾使用有界顺序 Workflow、证据校验、Memory 版本和 MySQL single-flight 缓存，默认关闭 |
 | 14 | 多 Agent 灰度评测 | 未启用 | `ENABLE_MULTI_AGENT` 和评测接口预留；当前运行时仍是单主 Agent |
 
 本表严格区分“代码已经可运行”和“仅有架构预留”。

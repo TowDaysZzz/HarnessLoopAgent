@@ -3,9 +3,12 @@ package mysqlstore
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
+
+	mysqlDriver "github.com/go-sql-driver/mysql"
 )
 
 //go:embed migrations/*.sql
@@ -30,7 +33,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 			if statement == "" {
 				continue
 			}
-			if err := s.db.WithContext(ctx).Exec(statement).Error; err != nil {
+			if err := s.db.WithContext(ctx).Exec(statement).Error; err != nil && !isDuplicateIndexError(err) {
 				return fmt.Errorf("apply migration %s: %w", entry.Name(), err)
 			}
 		}
@@ -39,6 +42,11 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return err
 	}
 	return s.ensureMemoryExactIndexes(ctx)
+}
+
+func isDuplicateIndexError(err error) bool {
+	var mysqlErr *mysqlDriver.MySQLError
+	return errors.As(err, &mysqlErr) && mysqlErr.Number == 1061
 }
 
 func (s *Store) ensureMemoryExactIndexes(ctx context.Context) error {

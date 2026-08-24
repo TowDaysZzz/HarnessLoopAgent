@@ -2,7 +2,11 @@ package routing
 
 import (
 	"context"
+	"errors"
 	"strings"
+	"time"
+
+	"github.com/TowDaysZzz/HarnessLoopAgent/internal/skill"
 )
 
 type PendingDraftLookup interface {
@@ -14,28 +18,61 @@ type RouteInput struct {
 	TenantID  uint64
 	SessionID string
 	Content   string
+	Now       time.Time
 }
 
 type Router struct {
-	Classifier Classifier
-	Drafts     PendingDraftLookup
+	Classifier         Classifier
+	Drafts             PendingDraftLookup
+	Skills             *skill.Registry
+	MinSkillConfidence float64
 }
 
 func (r Router) Route(ctx context.Context, input RouteInput) RouteDecision {
 	text := strings.TrimSpace(input.Content)
 	action, ok := draftAction(text)
 	if !ok {
-		return r.Classifier.Classify(text)
+		decision := r.Classifier.Classify(text)
+		if decision.Intent != IntentChat || decision.Reason != "default_chat" || r.Skills == nil {
+			if decision.Target == "" {
+				decision.Target = TargetBuiltin
+			}
+			return decision
+		}
+		now := input.Now
+		if now.IsZero() {
+			now = time.Now()
+		}
+		matched, found, err := r.Skills.Match(ctx, skill.MatchInput{Content: text, SessionID: input.SessionID, NowUnix: now.Unix()})
+		if err != nil {
+			reason := "skill_match_failed"
+			if errors.Is(err, skill.ErrAmbiguous) {
+				reason = "skill_match_ambiguous"
+			}
+			return RouteDecision{Target: TargetBuiltin, Intent: IntentUnclear, Complexity: ComplexitySimple, Deterministic: true, Confidence: 0, Reason: reason}
+		}
+		if !found {
+			decision.Target = TargetBuiltin
+			return decision
+		}
+		threshold := r.MinSkillConfidence
+		if threshold <= 0 {
+			threshold = .9
+		}
+		if matched.Confidence < threshold {
+			return RouteDecision{Target: TargetBuiltin, Intent: IntentUnclear, Complexity: ComplexitySimple, Deterministic: true, Confidence: matched.Confidence, Reason: matched.Reason}
+		}
+		return RouteDecision{Target: TargetSkill, Skill: &SkillTarget{ID: matched.Ref.ID, Version: matched.Ref.Version, Arguments: matched.Arguments, ArgumentsHash: matched.ArgumentsHash}, Intent: IntentSkillInvoke, Complexity: r.Classifier.classifyComplexity(text), Deterministic: true, NeedsModel: true, Confidence: matched.Confidence, Reason: matched.Reason}
 	}
 	hasPending := false
 	if r.Drafts != nil {
 		hasPending, _ = r.Drafts.HasPending(ctx, input.UserID, input.TenantID, input.SessionID)
 	}
 	if !hasPending {
-		return RouteDecision{Intent: IntentUnclear, Complexity: ComplexitySimple, Deterministic: true, Confidence: 1, Reason: "missing_pending_draft"}
+		return RouteDecision{Target: TargetBuiltin, Intent: IntentUnclear, Complexity: ComplexitySimple, Deterministic: true, Confidence: 1, Reason: "missing_pending_draft"}
 	}
 	return RouteDecision{
-		Intent: IntentNoteCreate, Complexity: r.Classifier.classifyComplexity(text), Deterministic: true,
+		Target: TargetBuiltin, Intent: IntentNoteCreate, Complexity: r.Classifier.classifyComplexity(text), Deterministic: true,
 		NeedsModel: action == "draft_modify", Confidence: 1, Reason: action,
 	}
 }

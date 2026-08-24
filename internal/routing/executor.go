@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/agent"
+	"github.com/TowDaysZzz/HarnessLoopAgent/internal/skill"
 )
 
 var ErrHandlerUnavailable = errors.New("routing handler unavailable")
@@ -27,6 +28,7 @@ type StreamingHandler interface {
 }
 
 type HandlerSet struct {
+	Skills           SkillExecutor
 	NoteCreate       DeterministicHandler
 	MemoryCapture    DeterministicHandler
 	MemoryRecall     DeterministicHandler
@@ -40,6 +42,10 @@ type HandlerSet struct {
 	SimpleNoteQuery  StreamingHandler
 	ComplexChat      StreamingHandler
 	ComplexNoteQuery StreamingHandler
+}
+
+type SkillExecutor interface {
+	Execute(context.Context, skill.Request) (skill.Execution, error)
 }
 
 type Execution struct {
@@ -57,6 +63,16 @@ func NewFacade(handlers HandlerSet) (*Facade, error) {
 
 func (f *Facade) Execute(ctx context.Context, input Input) (Execution, error) {
 	decision := input.Run.Decision
+	if decision.IsSkill() {
+		if f.handlers.Skills == nil || input.Run.SkillInvocation == nil {
+			return Execution{}, fmt.Errorf("%w: skill", ErrHandlerUnavailable)
+		}
+		execution, err := f.handlers.Skills.Execute(ctx, skill.Request{Invocation: *input.Run.SkillInvocation, Content: input.Content, Messages: input.Messages})
+		if err != nil {
+			return Execution{}, err
+		}
+		return Execution{Handler: "skill:" + string(execution.Ref.ID), Events: execution.Events}, nil
+	}
 	switch decision.Intent {
 	case IntentNoteCreate:
 		return f.deterministic(ctx, "note_create", f.handlers.NoteCreate, input)

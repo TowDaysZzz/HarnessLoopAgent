@@ -54,6 +54,24 @@ type agentRunEventRow struct {
 
 func (agentRunEventRow) TableName() string { return "agent_run_events" }
 
+type skillInvocationRow struct {
+	ID            string    `gorm:"column:id;primaryKey"`
+	TenantID      uint64    `gorm:"column:tenant_id"`
+	UserID        uint64    `gorm:"column:user_id"`
+	SessionID     string    `gorm:"column:session_id"`
+	ChatRunID     string    `gorm:"column:chat_run_id"`
+	SkillID       string    `gorm:"column:skill_id"`
+	SkillVersion  string    `gorm:"column:skill_version"`
+	ArgumentsJSON []byte    `gorm:"column:arguments_json"`
+	ArgumentsHash string    `gorm:"column:arguments_hash"`
+	Status        string    `gorm:"column:status"`
+	ErrorCode     string    `gorm:"column:error_code"`
+	CreatedAt     time.Time `gorm:"column:created_at"`
+	UpdatedAt     time.Time `gorm:"column:updated_at"`
+}
+
+func (skillInvocationRow) TableName() string { return "skill_invocations" }
+
 type authSessionRow struct {
 	ID                     string    `gorm:"column:id;primaryKey"`
 	UserID                 uint64    `gorm:"column:user_id"`
@@ -240,6 +258,36 @@ type memoryRecordRow struct {
 	CreatedAt       time.Time  `gorm:"column:created_at"`
 	UpdatedAt       time.Time  `gorm:"column:updated_at"`
 }
+
+type memoryMutationVersionRow struct {
+	TenantID        uint64    `gorm:"column:tenant_id;primaryKey"`
+	UserID          uint64    `gorm:"column:user_id;primaryKey"`
+	MutationVersion uint64    `gorm:"column:mutation_version"`
+	UpdatedAt       time.Time `gorm:"column:updated_at"`
+}
+
+func (memoryMutationVersionRow) TableName() string { return "memory_mutation_versions" }
+
+type dailyReviewCacheRow struct {
+	ID                string     `gorm:"column:id;primaryKey"`
+	TenantID          uint64     `gorm:"column:tenant_id"`
+	UserID            uint64     `gorm:"column:user_id"`
+	LogicalKey        string     `gorm:"column:logical_key"`
+	SourceFingerprint string     `gorm:"column:source_fingerprint"`
+	Status            string     `gorm:"column:status"`
+	ClaimToken        string     `gorm:"column:claim_token"`
+	LeaseUntil        *time.Time `gorm:"column:lease_until"`
+	ValidUntil        *time.Time `gorm:"column:valid_until"`
+	ResultJSON        []byte     `gorm:"column:result_json"`
+	RenderedText      string     `gorm:"column:rendered_text"`
+	EvidenceHash      string     `gorm:"column:evidence_hash"`
+	ContentHash       string     `gorm:"column:content_hash"`
+	ErrorCode         string     `gorm:"column:error_code"`
+	CreatedAt         time.Time  `gorm:"column:created_at"`
+	UpdatedAt         time.Time  `gorm:"column:updated_at"`
+}
+
+func (dailyReviewCacheRow) TableName() string { return "daily_review_cache" }
 
 func (memoryRecordRow) TableName() string { return "memory_records" }
 

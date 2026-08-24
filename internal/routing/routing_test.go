@@ -1,11 +1,30 @@
 package routing
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/TowDaysZzz/HarnessLoopAgent/internal/dailyreview"
+	"github.com/TowDaysZzz/HarnessLoopAgent/internal/skill"
 )
+
+type routingTestCodec struct{}
+
+func (routingTestCodec) Validate(raw json.RawMessage) error {
+	if !json.Valid(raw) {
+		return skill.ErrInvalidInvocation
+	}
+	return nil
+}
+
+type routingTestWorkflow struct{}
+
+func (routingTestWorkflow) Run(context.Context, skill.Request) (skill.Result, error) {
+	return skill.Result{Text: "ok"}, nil
+}
 
 func TestClassifierRoutesIntentAndComplexityIndependently(t *testing.T) {
 	c := Classifier{ComplexThreshold: 120, MinWriteConfidence: .95}
@@ -112,5 +131,25 @@ func TestRoutingEventsDoNotSerializeSecretsOrInput(t *testing.T) {
 				t.Fatalf("event %s contains forbidden field %q", encoded, forbidden)
 			}
 		}
+	}
+}
+
+func TestRouterSelectsDailyReviewSkillWithoutOverridingBuiltinWrites(t *testing.T) {
+	definition := skill.Definition{ID: "daily_review", Version: "v1", Mode: skill.ModeWorkflow, Risk: skill.RiskReadOnly, Dependencies: []skill.Dependency{"chat"}, Budget: skill.Budget{Timeout: time.Second, MaxSteps: 9, MaxModelCalls: 1, MaxToolCalls: 2, MaxContextBytes: 4096, MaxOutputBytes: 4096}, Matcher: dailyreview.Matcher{Timezone: "Asia/Shanghai", MaxLookbackDays: 31}, InputCodec: dailyreview.PlanCodec{Timezone: "Asia/Shanghai"}, OutputCodec: routingTestCodec{}, Workflow: routingTestWorkflow{}}
+	registry, err := skill.NewRegistry([]skill.Definition{definition}, map[skill.Dependency]bool{"chat": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := Router{Classifier: Classifier{MinWriteConfidence: .95}, Skills: registry, MinSkillConfidence: .9}
+	now := time.Date(2026, 8, 24, 4, 0, 0, 0, time.UTC)
+	got := router.Route(context.Background(), RouteInput{UserID: 1, TenantID: 2, SessionID: "session-1", Content: "回顾一下今天", Now: now})
+	if !got.IsSkill() || got.Intent != IntentSkillInvoke || got.Skill.ID != "daily_review" || got.Skill.ArgumentsHash == "" {
+		t.Fatalf("daily review route = %#v", got)
+	}
+	if got := router.Route(context.Background(), RouteInput{Content: "帮我记住我喜欢茶", Now: now}); got.Intent != IntentMemoryCapture || got.IsSkill() {
+		t.Fatalf("write route = %#v", got)
+	}
+	if got := router.Route(context.Background(), RouteInput{Content: "回顾今天并保存", Now: now}); got.Intent != IntentUnclear || got.IsSkill() {
+		t.Fatalf("ambiguous route = %#v", got)
 	}
 }

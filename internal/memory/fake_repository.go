@@ -15,6 +15,7 @@ type FakeRepository struct {
 	inputHashes       map[string]string
 	projections       map[string]Projection
 	projectionVersion string
+	mutationVersions  map[string]uint64
 }
 
 func NewFakeRepository() *FakeRepository {
@@ -22,7 +23,7 @@ func NewFakeRepository() *FakeRepository {
 }
 
 func NewFakeRepositoryWithProjectionVersion(version string) *FakeRepository {
-	return &FakeRepository{records: map[string]Record{}, idempotency: map[string]MutationResult{}, inputHashes: map[string]string{}, projections: map[string]Projection{}, projectionVersion: version}
+	return &FakeRepository{records: map[string]Record{}, idempotency: map[string]MutationResult{}, inputHashes: map[string]string{}, projections: map[string]Projection{}, projectionVersion: version, mutationVersions: map[string]uint64{}}
 }
 
 func ownerKey(owner Owner, key string) string {
@@ -183,6 +184,7 @@ func (r *FakeRepository) CommitMutation(_ context.Context, m Mutation) (Mutation
 	r.records[value.ID] = value
 	result := MutationResult{Memory: value, Relations: append([]Relation(nil), m.Relations...)}
 	r.idempotency[key], r.inputHashes[key] = result, m.InputHash
+	r.mutationVersions[ownerKey(m.Owner, "version")]++
 	return result, nil
 }
 
@@ -216,6 +218,7 @@ func (r *FakeRepository) TransitionMemory(ctx context.Context, owner Owner, id s
 	}
 	res := MutationResult{Memory: value}
 	r.idempotency[idem], r.inputHashes[idem] = res, inputHash
+	r.mutationVersions[ownerKey(owner, "version")]++
 	return res, nil
 }
 
@@ -256,6 +259,7 @@ func (r *FakeRepository) ActivateCandidateSuperseding(_ context.Context, activat
 	relations := []Relation{{FromID: candidate.ID, ToID: target.ID, Type: RelationSupersedes, ReasonCode: activation.ReasonCode}}
 	result := MutationResult{Memory: candidate, Relations: relations}
 	r.idempotency[idem], r.inputHashes[idem] = result, activation.InputHash
+	r.mutationVersions[ownerKey(activation.Owner, "version")]++
 	return result, nil
 }
 
@@ -273,7 +277,50 @@ func (r *FakeRepository) Expire(_ context.Context, owner Owner, now time.Time, l
 			count++
 		}
 	}
+	if count > 0 {
+		r.mutationVersions[ownerKey(owner, "version")]++
+	}
 	return count, nil
+}
+
+func (r *FakeRepository) MutationVersion(_ context.Context, owner Owner) (uint64, error) {
+	if !owner.Valid() {
+		return 0, ErrInvalidInput
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.mutationVersions[ownerKey(owner, "version")], nil
+}
+
+func (r *FakeRepository) ListActiveContextRefs(_ context.Context, owner Owner, kinds []Kind, now time.Time, limit int) ([]MemoryRef, error) {
+	if !owner.Valid() || limit < 1 || limit > 100 || len(kinds) == 0 {
+		return nil, ErrInvalidInput
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var values []Record
+	for _, value := range r.records {
+		if value.Owner == owner && value.IsActiveAt(now) && containsKind(kinds, value.Kind) {
+			values = append(values, value)
+		}
+	}
+	sort.Slice(values, func(i, j int) bool {
+		if values[i].Salience != values[j].Salience {
+			return values[i].Salience > values[j].Salience
+		}
+		if !values[i].UpdatedAt.Equal(values[j].UpdatedAt) {
+			return values[i].UpdatedAt.After(values[j].UpdatedAt)
+		}
+		return values[i].ID < values[j].ID
+	})
+	if len(values) > limit {
+		values = values[:limit]
+	}
+	refs := make([]MemoryRef, 0, len(values))
+	for _, value := range values {
+		refs = append(refs, value.Ref())
+	}
+	return refs, nil
 }
 
 func (r *FakeRepository) ClaimProjections(_ context.Context, limit int, now time.Time) ([]Projection, error) {

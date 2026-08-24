@@ -63,6 +63,8 @@ NOTE:
 
 Reminder 的 API、功能矩阵、投递保证及灰度/回滚步骤见 [Reminder API](docs/api/agent-reminder-api.md)。
 
+每日回顾以默认关闭的只读 Workflow Skill 接入同一 Chat Run/SSE 链路。用户可直接发送“回顾今天”“复盘昨天”或带明确日期的表达；当天跨会话消息、笔记和相关 Memory 没有变化时，重复触发会返回已验证缓存。配置、事件、新鲜度及回滚说明见 [Daily Review Skill](docs/api/daily-review-skill.md)。普通聊天以及 Note、Memory、Reminder 内建意图不必进入 Workflow，关闭 `SKILLS.ENABLED` 即恢复原有路由行为。
+
 创建会话和 Run：
 
 ```bash

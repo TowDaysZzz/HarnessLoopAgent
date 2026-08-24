@@ -17,9 +17,9 @@ import (
 
 func TestGORMPersistenceModelsCoverManagedTables(t *testing.T) {
 	models := []interface{ TableName() string }{
-		chatSessionRow{}, agentRunRow{}, chatMessageRow{}, agentRunEventRow{}, authSessionRow{}, noteRow{}, noteOutboxRow{}, knowledgeBaseRow{}, noteDraftRow{}, workflowRunRow{}, workflowWaitRow{}, workflowNodeEventRow{}, memoryRecordRow{}, memoryEventRow{}, memoryRelationRow{}, memoryProjectionRow{}, memoryEditPayloadRow{},
+		chatSessionRow{}, agentRunRow{}, chatMessageRow{}, agentRunEventRow{}, skillInvocationRow{}, authSessionRow{}, noteRow{}, noteOutboxRow{}, knowledgeBaseRow{}, noteDraftRow{}, workflowRunRow{}, workflowWaitRow{}, workflowNodeEventRow{}, memoryRecordRow{}, memoryMutationVersionRow{}, dailyReviewCacheRow{}, memoryEventRow{}, memoryRelationRow{}, memoryProjectionRow{}, memoryEditPayloadRow{},
 	}
-	want := []string{"chat_sessions", "agent_runs", "chat_messages", "agent_run_events", "agent_user_sessions", "notes", "note_outbox_events", "agent_user_knowledge_bases", "note_drafts", "workflow_runs", "workflow_waits", "workflow_node_events", "memory_records", "memory_events", "memory_relations", "memory_projection_outbox", "memory_edit_payloads"}
+	want := []string{"chat_sessions", "agent_runs", "chat_messages", "agent_run_events", "skill_invocations", "agent_user_sessions", "notes", "note_outbox_events", "agent_user_knowledge_bases", "note_drafts", "workflow_runs", "workflow_waits", "workflow_node_events", "memory_records", "memory_mutation_versions", "daily_review_cache", "memory_events", "memory_relations", "memory_projection_outbox", "memory_edit_payloads"}
 	if len(models) != len(want) {
 		t.Fatalf("models=%d tables=%d", len(models), len(want))
 	}

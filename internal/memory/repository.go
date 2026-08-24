@@ -201,3 +201,13 @@ type Repository interface {
 	CompleteProjection(context.Context, Owner, string, time.Time) error
 	FailProjection(context.Context, Owner, string, string, time.Time, bool) error
 }
+
+// MutationVersionReader exposes the owner-scoped monotonic version used by
+// consumers that must invalidate snapshots when any memory visibility changes.
+type MutationVersionReader interface {
+	MutationVersion(context.Context, Owner) (uint64, error)
+}
+
+type ContextRefSource interface {
+	ListActiveContextRefs(context.Context, Owner, []Kind, time.Time, int) ([]MemoryRef, error)
+}
