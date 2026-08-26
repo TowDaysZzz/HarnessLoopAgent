@@ -20,13 +20,14 @@ type memoryContextStub struct {
 	recalls, validates int
 	context            MemoryContext
 	stale              bool
+	recallErr          error
 }
 
 func (m *memoryContextStub) Recall(context.Context, skill.Owner, Window) (MemoryContext, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.recalls++
-	return m.context, nil
+	return m.context, m.recallErr
 }
 func (m *memoryContextStub) ValidatePinned(context.Context, skill.Owner, []MemoryRef, time.Time) error {
 	m.mu.Lock()
@@ -164,6 +165,26 @@ func TestReviewWorkflowToolBudgetTerminatesBeforeRecall(t *testing.T) {
 	}
 	if mem.recalls != 0 {
 		t.Fatalf("recalls=%d", mem.recalls)
+	}
+}
+
+func TestReviewWorkflowFailureReleasesOwnedCacheClaim(t *testing.T) {
+	review, _, mem, _, request, _, _ := workflowFixture(t)
+	review.Config.CacheWait = 20 * time.Millisecond
+	mem.recallErr = errors.New("recall failed")
+	if _, err := review.Run(context.Background(), request); err == nil {
+		t.Fatal("expected recall failure")
+	}
+
+	mem.recallErr = nil
+	request.Invocation.ID = "invocation-after-recall-failure"
+	request.Invocation.ChatRunID = "chat-run-after-recall-failure"
+	result, err := review.Run(context.Background(), request)
+	if err != nil {
+		t.Fatalf("second run should reclaim immediately: %v", err)
+	}
+	if result.CacheState != "miss" || result.Text == "" {
+		t.Fatalf("result=%#v", result)
 	}
 }
 

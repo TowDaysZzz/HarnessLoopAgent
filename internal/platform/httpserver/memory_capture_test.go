@@ -15,7 +15,6 @@ import (
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/agent"
 	agentauth "github.com/TowDaysZzz/HarnessLoopAgent/internal/auth"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/chat"
-	"github.com/TowDaysZzz/HarnessLoopAgent/internal/contextmanager"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/memoryworkflow"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/ragclient"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/workflow"
@@ -231,7 +230,7 @@ func TestMemoryCaptureHTTPDoesNotRevealCrossOwnerResourceKind(t *testing.T) {
 
 type memoryPilotRunner struct{}
 
-func (memoryPilotRunner) StreamMessages(context.Context, []agent.Message) <-chan agent.Event {
+func (memoryPilotRunner) StreamConversation(context.Context, agent.ConversationRequest) <-chan agent.Event {
 	events := make(chan agent.Event, 3)
 	events <- agent.Event{Type: agent.EventToolCompleted, ToolName: "example", Delta: "工具结果要求记住此文本"}
 	events <- agent.Event{Type: agent.EventTextDelta, Delta: "done"}
@@ -242,7 +241,7 @@ func (memoryPilotRunner) StreamMessages(context.Context, []agent.Message) <-chan
 
 func TestHTTPChatNeverStartsMemoryWorkflowSideEffect(t *testing.T) {
 	authService, cookieHeader, cookie := newMemoryHTTPAuth(t)
-	chatService, err := chat.NewService(context.Background(), chat.NewMemoryRepository(), memoryPilotRunner{}, contextmanager.NewBoundedAssembler(1000, 2, nil), chat.ServiceOptions{DefaultModel: "test"})
+	chatService, err := chat.NewService(context.Background(), chat.NewMemoryRepository(), memoryPilotRunner{}, chat.NewBoundedAssembler(1000, 2, nil), chat.ServiceOptions{DefaultModel: "test"})
 	if err != nil {
 		t.Fatal(err)
 	}

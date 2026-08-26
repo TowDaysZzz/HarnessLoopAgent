@@ -19,13 +19,14 @@ type reportRunner struct {
 
 type timeoutReportRunner struct{}
 
-func (timeoutReportRunner) StreamMessages(ctx context.Context, _ []agent.Message) <-chan agent.Event {
+func (timeoutReportRunner) StreamConversation(ctx context.Context, _ agent.ConversationRequest) <-chan agent.Event {
 	out := make(chan agent.Event, 1)
 	go func() { defer close(out); <-ctx.Done(); out <- agent.Event{Type: agent.EventRunFailed, Err: ctx.Err()} }()
 	return out
 }
 
-func (r *reportRunner) StreamMessages(_ context.Context, messages []agent.Message) <-chan agent.Event {
+func (r *reportRunner) StreamConversation(_ context.Context, request agent.ConversationRequest) <-chan agent.Event {
+	messages := request.Messages
 	r.messages = append(r.messages, messages)
 	index := r.calls
 	r.calls++

@@ -31,6 +31,11 @@ type StreamRunner interface {
 	Stream(ctx context.Context, prompt string) <-chan Event
 }
 
+type ConversationRequest struct {
+	Messages             []Message
+	RequireNoteRetrieval bool
+}
+
 type ConversationRunner interface {
-	StreamMessages(ctx context.Context, messages []Message) <-chan Event
+	StreamConversation(ctx context.Context, request ConversationRequest) <-chan Event
 }

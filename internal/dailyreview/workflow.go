@@ -37,19 +37,20 @@ type WorkflowConfig struct {
 }
 
 type DailyReviewState struct {
-	Owner         skill.Owner         `json:"owner"`
-	Plan          PlanV1              `json:"plan"`
-	Window        Window              `json:"window"`
-	Snapshot      SourceSnapshot      `json:"snapshot"`
-	CacheIdentity CacheIdentity       `json:"cache_identity"`
-	Cache         CacheRecord         `json:"cache"`
-	CacheHit      bool                `json:"cache_hit"`
-	Evidence      Evidence            `json:"-"`
-	MemoryRefs    []MemoryRef         `json:"memory_refs"`
-	MemoryBodies  map[string]string   `json:"-"`
-	MemoryExpiry  *time.Time          `json:"memory_expiry,omitempty"`
-	Report        DailyReviewReportV1 `json:"report"`
-	Rendered      string              `json:"rendered"`
+	Owner          skill.Owner         `json:"owner"`
+	Plan           PlanV1              `json:"plan"`
+	Window         Window              `json:"window"`
+	Snapshot       SourceSnapshot      `json:"snapshot"`
+	CacheIdentity  CacheIdentity       `json:"cache_identity"`
+	Cache          CacheRecord         `json:"cache"`
+	CacheHit       bool                `json:"cache_hit"`
+	OwnsCacheClaim bool                `json:"owns_cache_claim"`
+	Evidence       Evidence            `json:"-"`
+	MemoryRefs     []MemoryRef         `json:"memory_refs"`
+	MemoryBodies   map[string]string   `json:"-"`
+	MemoryExpiry   *time.Time          `json:"memory_expiry,omitempty"`
+	Report         DailyReviewReportV1 `json:"report"`
+	Rendered       string              `json:"rendered"`
 }
 
 type ReviewWorkflow struct {
@@ -180,7 +181,25 @@ func (w ReviewWorkflow) runOnce(ctx context.Context, invocation skill.Invocation
 			steps = append(steps, string(event.NodeID))
 		}
 	}
+	if err != nil {
+		w.releaseFailedClaim(ctx, &result.State.Data, err)
+	}
 	return result.State.Data, steps, err
+}
+
+func (w ReviewWorkflow) releaseFailedClaim(ctx context.Context, state *DailyReviewState, cause error) {
+	if state == nil || !state.OwnsCacheClaim || state.Cache.ID == "" || state.Cache.ClaimToken == "" {
+		return
+	}
+	code := string(workflow.CodeOf(cause))
+	if code == "" {
+		code = "workflow_failed"
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	defer cancel()
+	if err := w.Cache.FailClaim(cleanupCtx, state.Owner, state.Cache.ID, state.Cache.ClaimToken, code, w.Now().UTC()); err == nil {
+		state.OwnsCacheClaim = false
+	}
 }
 
 func (w ReviewWorkflow) lookupOrClaim(ctx context.Context, s *DailyReviewState, invocation skill.Invocation, now time.Time) error {
@@ -204,6 +223,7 @@ func (w ReviewWorkflow) lookupOrClaim(ctx context.Context, s *DailyReviewState, 
 	}
 	s.Cache = claim.Record
 	if claim.Generator {
+		s.OwnsCacheClaim = true
 		return nil
 	}
 	deadline := time.Now().Add(w.Config.CacheWait)
@@ -240,6 +260,7 @@ func (w ReviewWorkflow) recheckAndCommit(ctx context.Context, s *DailyReviewStat
 	if len(s.MemoryRefs) > 0 {
 		if err := w.Memory.ValidatePinned(ctx, s.Owner, s.MemoryRefs, now); err != nil {
 			_ = w.Cache.FailClaim(ctx, s.Owner, s.Cache.ID, s.Cache.ClaimToken, "stale_memory", now)
+			s.OwnsCacheClaim = false
 			return errSourceChanged
 		}
 	}
@@ -249,6 +270,7 @@ func (w ReviewWorkflow) recheckAndCommit(ctx context.Context, s *DailyReviewStat
 	}
 	if latest.Digest != s.Snapshot.Digest {
 		_ = w.Cache.FailClaim(ctx, s.Owner, s.Cache.ID, s.Cache.ClaimToken, "source_changed", now)
+		s.OwnsCacheClaim = false
 		return errSourceChanged
 	}
 	rendered := RenderReport(s.Report)
@@ -258,6 +280,7 @@ func (w ReviewWorkflow) recheckAndCommit(ctx context.Context, s *DailyReviewStat
 	record, err := w.Cache.CommitReady(ctx, s.Owner, s.Cache.ID, s.Cache.ClaimToken, result, validUntil, now)
 	if err == nil {
 		s.Cache, s.Rendered = record, rendered
+		s.OwnsCacheClaim = false
 	}
 	return err
 }

@@ -49,7 +49,7 @@ func (g StructuredGenerator) Generate(ctx context.Context, snapshot SourceSnapsh
 func collectModelOutput(ctx context.Context, runner agent.ConversationRunner, messages []agent.Message, max int) (string, error) {
 	var b strings.Builder
 	terminal := false
-	for event := range runner.StreamMessages(ctx, messages) {
+	for event := range runner.StreamConversation(ctx, agent.ConversationRequest{Messages: messages}) {
 		switch event.Type {
 		case agent.EventTextDelta:
 			if b.Len()+len(event.Delta) > max {

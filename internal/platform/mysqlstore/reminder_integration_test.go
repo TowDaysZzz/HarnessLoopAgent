@@ -84,11 +84,13 @@ func TestReminderDueClaimOccurrenceRollbackAndDelivery(t *testing.T) {
 	store, _ := openMemoryStore(t)
 	owner := reminder.Owner{TenantID: 8701, UserID: uint64(time.Now().UnixNano()%500000000) + 8500000000}
 	now := time.Now().UTC().Truncate(time.Microsecond)
-	value := integrationReminder(t, owner, now.Add(time.Minute))
+	value := integrationReminder(t, owner, now.Add(-time.Second))
 	if _, err := store.Create(context.Background(), reminder.CreateInput{Reminder: value, IdempotencyKey: uuid.NewString(), InputHash: strings.Repeat("1", 64)}); err != nil {
 		t.Fatal(err)
 	}
-	dueAt := value.NextFireAt
+	// The MySQL adapter must use database time. A stale application timestamp
+	// must not prevent an already-due reminder from being claimed.
+	dueAt := now.Add(-time.Hour)
 	type claimResult struct {
 		values []reminder.Reminder
 		err    error

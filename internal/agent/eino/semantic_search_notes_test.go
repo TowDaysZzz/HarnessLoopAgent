@@ -11,13 +11,15 @@ import (
 )
 
 type recordingRetriever struct {
-	request ragclient.RetrieveRequest
-	result  *ragclient.RetrieveResponse
-	err     error
+	request  ragclient.RetrieveRequest
+	requests []ragclient.RetrieveRequest
+	result   *ragclient.RetrieveResponse
+	err      error
 }
 
 func (r *recordingRetriever) Retrieve(_ context.Context, request ragclient.RetrieveRequest) (*ragclient.RetrieveResponse, error) {
 	r.request = request
+	r.requests = append(r.requests, request)
 	return r.result, r.err
 }
 

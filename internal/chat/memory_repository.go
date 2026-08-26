@@ -5,67 +5,22 @@ import (
 	"sort"
 	"sync"
 	"time"
-
-	"github.com/TowDaysZzz/HarnessLoopAgent/internal/skill"
 )
 
 type MemoryRepository struct {
-	mu              sync.Mutex
-	sessions        map[string]Session
-	messages        map[string][]Message
-	runs            map[string]Run
-	events          map[string][]Event
-	idem            map[string]string
-	invocations     map[string]skill.Invocation
-	invocationByRun map[string]string
+	mu       sync.Mutex
+	sessions map[string]Session
+	messages map[string][]Message
+	runs     map[string]Run
+	events   map[string][]Event
+	idem     map[string]string
 }
 
 func NewMemoryRepository() *MemoryRepository {
 	return &MemoryRepository{
 		sessions: make(map[string]Session), messages: make(map[string][]Message),
 		runs: make(map[string]Run), events: make(map[string][]Event), idem: make(map[string]string),
-		invocations: make(map[string]skill.Invocation), invocationByRun: make(map[string]string),
 	}
-}
-
-func (r *MemoryRepository) CreateInvocation(_ context.Context, value skill.Invocation) (skill.Invocation, bool, error) {
-	if err := value.Validate(); err != nil {
-		return skill.Invocation{}, false, err
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if id, ok := r.invocationByRun[value.ChatRunID]; ok {
-		existing := r.invocations[id]
-		if existing.Owner != value.Owner || existing.Skill != value.Skill || existing.ArgumentsHash != value.ArgumentsHash {
-			return skill.Invocation{}, false, skill.ErrInvalidInvocation
-		}
-		return existing, false, nil
-	}
-	r.invocations[value.ID] = value
-	r.invocationByRun[value.ChatRunID] = value.ID
-	return value, true, nil
-}
-
-func (r *MemoryRepository) GetInvocation(_ context.Context, owner skill.Owner, id string) (skill.Invocation, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	value, ok := r.invocations[id]
-	if !ok || value.Owner != owner {
-		return skill.Invocation{}, skill.ErrNotFound
-	}
-	return value, nil
-}
-
-func (r *MemoryRepository) TransitionInvocation(_ context.Context, owner skill.Owner, id string, from, to skill.InvocationStatus, _ string, now time.Time) (skill.Invocation, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	value, ok := r.invocations[id]
-	if !ok || value.Owner != owner || value.Status != from || !skill.CanTransitionInvocation(from, to) {
-		return skill.Invocation{}, skill.ErrNotFound
-	}
-	value.Status, value.UpdatedAt = to, now.UTC()
-	r.invocations[id] = value
-	return value, nil
 }
 
 func (r *MemoryRepository) CreateSession(_ context.Context, session Session) error {

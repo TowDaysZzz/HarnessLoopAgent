@@ -15,7 +15,7 @@ import (
 
 type securityRunner struct{ response string }
 
-func (r securityRunner) StreamMessages(context.Context, []agent.Message) <-chan agent.Event {
+func (r securityRunner) StreamConversation(context.Context, agent.ConversationRequest) <-chan agent.Event {
 	events := make(chan agent.Event, 2)
 	events <- agent.Event{Type: agent.EventTextDelta, Delta: r.response}
 	events <- agent.Event{Type: agent.EventRunCompleted}

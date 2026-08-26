@@ -72,14 +72,34 @@ func (r *Runner) Metrics() agentruntime.SnapshotMetrics {
 }
 
 func (r *Runner) Stream(ctx context.Context, prompt string) <-chan appagent.Event {
-	return r.StreamMessages(ctx, []appagent.Message{{Role: "user", Content: prompt}})
+	return r.StreamConversation(ctx, appagent.ConversationRequest{
+		Messages:             []appagent.Message{{Role: "user", Content: prompt}},
+		RequireNoteRetrieval: grounding.NeedsNoteRetrieval(prompt),
+	})
 }
 
+// StreamMessages remains a concrete compatibility helper for callers that do not
+// yet provide an explicit retrieval decision. New orchestration should call
+// StreamConversation.
 func (r *Runner) StreamMessages(ctx context.Context, messages []appagent.Message) <-chan appagent.Event {
+	_, prompt, err := toSchemaMessages(messages)
+	if err != nil {
+		failed := make(chan appagent.Event, 1)
+		failed <- appagent.Event{Type: appagent.EventRunFailed, Err: err}
+		close(failed)
+		return failed
+	}
+	return r.StreamConversation(ctx, appagent.ConversationRequest{
+		Messages:             messages,
+		RequireNoteRetrieval: grounding.NeedsNoteRetrieval(prompt),
+	})
+}
+
+func (r *Runner) StreamConversation(ctx context.Context, request appagent.ConversationRequest) <-chan appagent.Event {
 	// Keep one slot reserved so the terminal event cannot be lost when the
 	// consumer is briefly slower than the model stream.
 	out := make(chan appagent.Event, 1)
-	schemaMessages, prompt, err := toSchemaMessages(messages)
+	schemaMessages, prompt, err := toSchemaMessages(request.Messages)
 	if err != nil {
 		close(out)
 		failed := make(chan appagent.Event, 1)
@@ -87,11 +107,11 @@ func (r *Runner) StreamMessages(ctx context.Context, messages []appagent.Message
 		close(failed)
 		return failed
 	}
-	go r.run(ctx, schemaMessages, prompt, out)
+	go r.run(ctx, schemaMessages, prompt, request.RequireNoteRetrieval, out)
 	return out
 }
 
-func (r *Runner) run(parent context.Context, messages []*schema.Message, prompt string, out chan<- appagent.Event) {
+func (r *Runner) run(parent context.Context, messages []*schema.Message, prompt string, requireNoteRetrieval bool, out chan<- appagent.Event) {
 	defer close(out)
 	ctx, cancel, _ := agentruntime.Start(parent, agentruntime.Budget{
 		RunTimeout: r.options.RunTimeout, MaxModelCalls: r.options.MaxModelCalls, MaxToolCalls: r.options.MaxToolCalls,
@@ -104,8 +124,8 @@ func (r *Runner) run(parent context.Context, messages []*schema.Message, prompt 
 		agentruntime.Emit(ctx, agentruntime.Event{Stage: agentruntime.StageRunEnd, Duration: time.Since(start), Err: runErr})
 	}()
 
-	protected := r.options.RequireRAGForNoteQuery && grounding.NeedsNoteRetrieval(prompt)
-	if protected {
+	groundingActive := r.options.RequireRAGForNoteQuery && requireNoteRetrieval
+	if groundingActive {
 		emit(ctx, out, appagent.Event{Type: appagent.EventStatus, Status: "retrieving"})
 	}
 	iterator := r.runner.Run(ctx, messages)
@@ -125,7 +145,7 @@ func (r *Runner) run(parent context.Context, messages []*schema.Message, prompt 
 		if event.Output == nil || event.Output.MessageOutput == nil {
 			continue
 		}
-		if !protected && event.Output.MessageOutput.Role != schema.Tool {
+		if !groundingActive && event.Output.MessageOutput.Role != schema.Tool {
 			if err := forwardMessage(ctx, out, event.Output.MessageOutput); err != nil {
 				runErr = err
 				emitTerminal(out, appagent.Event{Type: appagent.EventRunFailed, Err: err})
@@ -145,18 +165,19 @@ func (r *Runner) run(parent context.Context, messages []*schema.Message, prompt 
 				if err := json.Unmarshal([]byte(content), &observation); err != nil {
 					observation = grounding.Observation{Reason: "invalid_tool_output", Items: nil}
 				}
+				groundingActive = true
 			}
 			emit(ctx, out, appagent.Event{Type: eventType, Delta: summarizeToolResult(toolName, observation, content), ToolName: toolName})
 			continue
 		}
-		if protected {
+		if groundingActive {
 			draft.WriteString(content)
 		} else if content != "" {
 			emit(ctx, out, appagent.Event{Type: eventType, Delta: content})
 		}
 	}
 
-	if protected {
+	if groundingActive {
 		emit(ctx, out, appagent.Event{Type: appagent.EventStatus, Status: "validating"})
 		answer, err := r.validateOrRepair(ctx, prompt, draft.String(), toolObserved, observation)
 		if err != nil {
@@ -180,6 +201,8 @@ func toSchemaMessages(messages []appagent.Message) ([]*schema.Message, string, e
 			return nil, "", errors.New("conversation message content must not be empty")
 		}
 		switch message.Role {
+		case "system":
+			converted = append(converted, schema.SystemMessage(content))
 		case "user":
 			converted = append(converted, schema.UserMessage(content))
 		case "assistant":

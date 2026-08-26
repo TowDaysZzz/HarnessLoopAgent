@@ -135,16 +135,17 @@ func TestRunnerPassesConversationHistory(t *testing.T) {
 		t.Fatalf("NewRunner() error = %v", err)
 	}
 	for range runner.StreamMessages(context.Background(), []appagent.Message{
+		{Role: "system", Content: "return strict JSON"},
 		{Role: "user", Content: "my name is Ada"},
 		{Role: "assistant", Content: "noted"},
 		{Role: "user", Content: "what is my name?"},
 	}) {
 	}
-	if len(model.messages) < 3 {
+	if len(model.messages) < 4 {
 		t.Fatalf("model messages = %#v", model.messages)
 	}
-	got := model.messages[len(model.messages)-3:]
-	if got[0].Content != "my name is Ada" || got[1].Content != "noted" || got[2].Content != "what is my name?" {
+	got := model.messages[len(model.messages)-4:]
+	if got[0].Role != schema.System || got[0].Content != "return strict JSON" || got[1].Content != "my name is Ada" || got[2].Content != "noted" || got[3].Content != "what is my name?" {
 		t.Fatalf("history = %#v", got)
 	}
 }

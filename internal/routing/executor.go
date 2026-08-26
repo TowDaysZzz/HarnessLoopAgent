@@ -153,14 +153,13 @@ type ConversationHandler struct {
 
 type ComplexHandler struct {
 	conversation ConversationHandler
-	maxSteps     int
 }
 
-func NewComplexHandler(runner agent.ConversationRunner, timeout time.Duration, maxSteps int) (*ComplexHandler, error) {
-	if runner == nil || timeout <= 0 || maxSteps < 1 {
-		return nil, errors.New("complex handler requires runner, positive timeout, and positive step budget")
+func NewComplexHandler(runner agent.ConversationRunner, timeout time.Duration) (*ComplexHandler, error) {
+	if runner == nil || timeout <= 0 {
+		return nil, errors.New("complex handler requires runner and positive timeout")
 	}
-	return &ComplexHandler{conversation: ConversationHandler{Runner: runner, Timeout: timeout}, maxSteps: maxSteps}, nil
+	return &ComplexHandler{conversation: ConversationHandler{Runner: runner, Timeout: timeout}}, nil
 }
 
 func (h *ComplexHandler) Stream(ctx context.Context, input Input) <-chan agent.Event {
@@ -172,10 +171,10 @@ func (h ConversationHandler) Stream(ctx context.Context, input Input) <-chan age
 		return failedStream(errors.New("conversation runner is not configured"))
 	}
 	if h.Timeout <= 0 {
-		return h.Runner.StreamMessages(ctx, input.Messages)
+		return h.Runner.StreamConversation(ctx, agent.ConversationRequest{Messages: input.Messages})
 	}
 	bounded, cancel := context.WithTimeout(ctx, h.Timeout)
-	source := h.Runner.StreamMessages(bounded, input.Messages)
+	source := h.Runner.StreamConversation(bounded, agent.ConversationRequest{Messages: input.Messages})
 	// The buffer guarantees that a synthesized terminal event can be delivered
 	// even if the HTTP/SSE consumer is momentarily back-pressured.
 	out := make(chan agent.Event, 1)

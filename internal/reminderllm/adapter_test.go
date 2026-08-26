@@ -14,7 +14,8 @@ type scriptedRunner struct {
 	messages [][]agent.Message
 }
 
-func (r *scriptedRunner) StreamMessages(_ context.Context, messages []agent.Message) <-chan agent.Event {
+func (r *scriptedRunner) StreamConversation(_ context.Context, request agent.ConversationRequest) <-chan agent.Event {
+	messages := request.Messages
 	r.messages = append(r.messages, messages)
 	out := make(chan agent.Event, 2)
 	value := ""

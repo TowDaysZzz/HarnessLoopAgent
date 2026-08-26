@@ -1,0 +1,34 @@
+<style>
+  .layout-wrap{display:grid;grid-template-columns:minmax(0,1.65fr) minmax(260px,.55fr);gap:22px;align-items:start}
+  .device{overflow:hidden;border:1px solid rgba(60,60,67,.14);border-radius:22px;background:#fffafa;color:#1c1c1e;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;box-shadow:0 20px 60px rgba(28,28,30,.08)}
+  .desktop{min-height:510px;display:grid;grid-template-columns:170px minmax(0,1fr)}
+  .side{display:flex;flex-direction:column;padding:18px 12px;border-right:1px solid rgba(60,60,67,.12);background:rgba(255,255,255,.66);backdrop-filter:blur(20px)}
+  .logo{display:flex;align-items:center;gap:9px;padding:5px 8px 20px;font-weight:750}.logo i{width:27px;height:27px;border-radius:9px;background:#2e8b57}
+  .navitem{display:flex;align-items:center;gap:8px;margin:2px 0;padding:9px;border-radius:10px;color:#636366;font-size:11px}.navitem i{width:15px;height:15px;border:1.5px solid currentColor;border-radius:5px}.navitem.active{color:#2e8b57;background:rgba(46,139,87,.10);font-weight:650}.navitem.link{color:#027afe}.profile-mini{margin-top:auto;padding:10px 8px;border-top:1px solid rgba(60,60,67,.12);font-size:10px;color:#636366}
+  .main{min-width:0}.top{height:56px;display:flex;align-items:center;justify-content:space-between;padding:0 22px;border-bottom:1px solid rgba(60,60,67,.10);background:rgba(255,250,250,.75);backdrop-filter:blur(18px)}
+  .search{width:240px;padding:9px 12px;border:1px solid rgba(60,60,67,.12);border-radius:11px;background:white;color:#8e8e93;font-size:10px}.blue{color:#027afe;font-size:10px;font-weight:650}
+  .body{padding:25px 28px}.kicker{color:#2e8b57;font-size:9px;font-weight:750;letter-spacing:.08em}.body h3{margin:5px 0;font-size:23px;letter-spacing:-.035em}.sub{margin:0;color:#636366;font-size:10px}
+  .capture{margin-top:20px;padding:17px;border-radius:16px;background:white;border:1px solid rgba(60,60,67,.10);box-shadow:0 8px 28px rgba(28,28,30,.045)}.line{height:8px;border-radius:5px;background:#d1d1d6}.line.title{width:56%;height:10px;background:#1c1c1e}.line.mid{width:85%;margin-top:12px}.line.short{width:62%;margin-top:8px;background:#e5e5ea}.capture-foot{display:flex;align-items:center;justify-content:space-between;margin-top:17px;padding-top:12px;border-top:1px solid rgba(60,60,67,.10)}.capture-foot span{color:#027afe;font-size:9px}.save{padding:9px 13px;border-radius:10px;color:white;background:#2e8b57;font-size:9px;font-weight:700}
+  .section-title{display:flex;align-items:center;justify-content:space-between;margin:22px 0 10px;font-size:12px;font-weight:700}.section-title span{color:#027afe;font-size:9px}
+  .notes{display:grid;grid-template-columns:1fr 1fr;gap:10px}.note{min-height:112px;padding:14px;border-radius:15px;background:white;border:1px solid rgba(60,60,67,.10)}.note small{color:#8e8e93;font-size:8px}.note b{display:block;margin:9px 0 5px;font-size:11px}.note p{margin:0;color:#636366;font-size:9px;line-height:1.5}
+  .phone{width:100%;min-height:510px;display:flex;flex-direction:column}.phone-head{height:48px;display:flex;align-items:center;justify-content:space-between;padding:0 15px;background:rgba(255,250,250,.82);backdrop-filter:blur(18px);border-bottom:1px solid rgba(60,60,67,.10);font-weight:750}.phone-head i{width:25px;height:25px;border-radius:9px;background:#2e8b57}.phone-body{flex:1;padding:21px 16px}.phone-body h3{margin:5px 0;font-size:23px;letter-spacing:-.04em}.phone .capture{margin-top:17px}.phone .notes{grid-template-columns:1fr}.phone-tabs{display:flex;justify-content:space-around;padding:9px 10px calc(9px + env(safe-area-inset-bottom));border-top:1px solid rgba(60,60,67,.12);background:rgba(255,255,255,.86);backdrop-filter:blur(20px);color:#8e8e93;font-size:9px}.phone-tabs span:first-child{color:#2e8b57;font-weight:700}
+  .note-callout{margin-top:20px;padding:14px 16px;border-left:3px solid #2e8b57;border-radius:0 12px 12px 0;background:rgba(46,139,87,.07);color:#3a3a3c;font-size:11px;line-height:1.6}
+  @media(max-width:900px){.layout-wrap{grid-template-columns:1fr}.desktop{min-height:440px}.phone{max-width:390px;margin:auto}}
+</style>
+
+<h2>A · 柔和 iOS 的页面结构</h2>
+<p class="subtitle">桌面保留侧边栏提高效率；移动端改成底部 Tab Bar，并预留 iPhone 安全区。</p>
+
+<div class="layout-wrap">
+  <div>
+    <div class="device desktop">
+      <aside class="side"><div class="logo"><i></i>mori</div><div class="navitem active"><i></i>我的笔记</div><div class="navitem"><i></i>与知识对话</div><div class="navitem link">查看全部标签 →</div><div class="profile-mini">● 知识库已连接<br><span style="color:#8e8e93">Demo 体验者</span></div></aside>
+      <main class="main"><div class="top"><div class="search">⌕ 搜索你的知识…</div><div class="blue">今日回顾</div></div><div class="body"><div class="kicker">星期三 · 8月26日</div><h3>今天想记下什么？</h3><p class="sub">捕捉一个念头，让它在未来与你重逢。</p><div class="capture"><div class="line title"></div><div class="line mid"></div><div class="line short"></div><div class="capture-foot"><span>＋ 添加标签</span><div class="save">保存笔记</div></div></div><div class="section-title">最近笔记 <span>查看全部 →</span></div><div class="notes"><div class="note"><small>今天 09:42</small><b>让知识真正流动起来</b><p>记录只是起点，连接与行动才是终点。</p></div><div class="note"><small>昨天 16:20</small><b>周三项目同步</b><p>下一步聚焦新用户的空状态。</p></div></div></div></main>
+    </div>
+    <div class="note-callout">桌面端减少独立装饰卡片，把洞察收进内容流；主操作绿色，辅助跳转蓝色。</div>
+  </div>
+
+  <div class="device phone">
+    <div class="phone-head"><span>mori</span><i></i></div><div class="phone-body"><div class="kicker">今天</div><h3>记下此刻的想法</h3><p class="sub">让每条笔记在未来与你重逢。</p><div class="capture"><div class="line title"></div><div class="line mid"></div><div class="line short"></div><div class="capture-foot"><span>添加标签</span><div class="save">保存</div></div></div><div class="section-title">最近笔记 <span>查看全部 →</span></div><div class="notes"><div class="note"><small>今天 09:42</small><b>让知识真正流动起来</b><p>记录只是起点，连接与行动才是终点。</p></div></div></div><div class="phone-tabs"><span>笔记</span><span>对话</span></div>
+  </div>
+</div>

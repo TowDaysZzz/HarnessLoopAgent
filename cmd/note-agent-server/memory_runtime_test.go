@@ -15,7 +15,7 @@ import (
 
 type assemblyRunner struct{}
 
-func (assemblyRunner) StreamMessages(context.Context, []agent.Message) <-chan agent.Event {
+func (assemblyRunner) StreamConversation(context.Context, agent.ConversationRequest) <-chan agent.Event {
 	events := make(chan agent.Event)
 	close(events)
 	return events

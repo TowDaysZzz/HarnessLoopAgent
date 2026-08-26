@@ -222,20 +222,24 @@ func (s *Store) ClaimDue(ctx context.Context, request reminder.DueClaimRequest) 
 		return nil, reminder.ErrInvalidInput
 	}
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		dbNow, err := databaseUTCNow(tx)
+		if err != nil {
+			return err
+		}
 		var rows []reminderRow
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).Where("status='scheduled' AND next_fire_at<=? AND (lease_until IS NULL OR lease_until<=?)", request.Now.UTC(), request.Now.UTC()).Order("next_fire_at ASC,id ASC").Limit(request.Limit).Find(&rows).Error; err != nil {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).Where("status='scheduled' AND next_fire_at<=? AND (lease_until IS NULL OR lease_until<=?)", dbNow, dbNow).Order("next_fire_at ASC,id ASC").Limit(request.Limit).Find(&rows).Error; err != nil {
 			return err
 		}
 		for _, row := range rows {
-			until := request.Now.Add(request.LeaseDuration).UTC()
-			write := tx.Model(&reminderRow{}).Where("id=? AND row_version=? AND status='scheduled'", row.ID, row.RowVersion).Updates(map[string]any{"claim_token": request.Token, "lease_until": until, "row_version": gorm.Expr("row_version+1"), "updated_at": request.Now.UTC()})
+			until := dbNow.Add(request.LeaseDuration)
+			write := tx.Model(&reminderRow{}).Where("id=? AND row_version=? AND status='scheduled'", row.ID, row.RowVersion).Updates(map[string]any{"claim_token": request.Token, "lease_until": until, "row_version": gorm.Expr("row_version+1"), "updated_at": dbNow})
 			if write.Error != nil {
 				return write.Error
 			}
 			if write.RowsAffected != 1 {
 				continue
 			}
-			row.ClaimToken, row.LeaseUntil, row.RowVersion, row.UpdatedAt = &request.Token, &until, row.RowVersion+1, request.Now.UTC()
+			row.ClaimToken, row.LeaseUntil, row.RowVersion, row.UpdatedAt = &request.Token, &until, row.RowVersion+1, dbNow
 			value, convErr := s.reminderFromRowWith(tx, row)
 			if convErr != nil {
 				return convErr
@@ -248,7 +252,7 @@ func (s *Store) ClaimDue(ctx context.Context, request reminder.DueClaimRequest) 
 }
 
 func (s *Store) RenewClaim(ctx context.Context, id string, version uint64, token string, until time.Time) error {
-	write := s.db.WithContext(ctx).Model(&reminderRow{}).Where("id=? AND row_version=? AND status='scheduled' AND claim_token=? AND lease_until>?", id, version, token, time.Now().UTC()).Update("lease_until", until.UTC())
+	write := s.db.WithContext(ctx).Model(&reminderRow{}).Where("id=? AND row_version=? AND status='scheduled' AND claim_token=? AND lease_until>UTC_TIMESTAMP(6)", id, version, token).Update("lease_until", until.UTC())
 	if write.Error != nil {
 		return write.Error
 	}
@@ -259,7 +263,7 @@ func (s *Store) RenewClaim(ctx context.Context, id string, version uint64, token
 }
 
 func (s *Store) CommitOccurrence(ctx context.Context, input reminder.CommitOccurrenceInput) (delivery reminder.Delivery, replayed bool, err error) {
-	if input.ReminderID == "" || input.ExpectedRowVersion == 0 || input.ClaimToken == "" || input.OccurrenceID == "" || input.OccurredAt.IsZero() {
+	if input.ReminderID == "" || input.OccurrenceID == "" || input.OccurredAt.IsZero() {
 		return delivery, false, reminder.ErrInvalidInput
 	}
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -273,32 +277,50 @@ func (s *Store) CommitOccurrence(ctx context.Context, input reminder.CommitOccur
 		if !errors.Is(find, gorm.ErrRecordNotFound) {
 			return find
 		}
+		if input.ExpectedRowVersion == 0 || input.ClaimToken == "" {
+			return reminder.ErrInvalidInput
+		}
+		dbNow, err := databaseUTCNow(tx)
+		if err != nil {
+			return err
+		}
 		var row reminderRow
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id=?", input.ReminderID).First(&row).Error; errors.Is(err, gorm.ErrRecordNotFound) {
 			return reminder.ErrNotFound
 		} else if err != nil {
 			return err
 		}
-		if row.RowVersion != input.ExpectedRowVersion || row.Status != string(reminder.StatusScheduled) || row.ClaimToken == nil || *row.ClaimToken != input.ClaimToken || row.LeaseUntil == nil || !row.LeaseUntil.After(input.OccurredAt) {
+		if row.RowVersion != input.ExpectedRowVersion || row.Status != string(reminder.StatusScheduled) || row.ClaimToken == nil || *row.ClaimToken != input.ClaimToken || row.LeaseUntil == nil || !row.LeaseUntil.After(dbNow) {
 			return reminder.ErrLeaseLost
 		}
-		write := tx.Model(&reminderRow{}).Where("id=? AND row_version=? AND status='scheduled' AND claim_token=?", row.ID, row.RowVersion, input.ClaimToken).Updates(map[string]any{"status": reminder.StatusProcessing, "row_version": gorm.Expr("row_version+1"), "claim_token": nil, "lease_until": nil, "updated_at": input.OccurredAt.UTC()})
+		write := tx.Model(&reminderRow{}).Where("id=? AND row_version=? AND status='scheduled' AND claim_token=?", row.ID, row.RowVersion, input.ClaimToken).Updates(map[string]any{"status": reminder.StatusProcessing, "row_version": gorm.Expr("row_version+1"), "claim_token": nil, "lease_until": nil, "updated_at": dbNow})
 		if write.Error != nil {
 			return write.Error
 		}
 		if write.RowsAffected != 1 {
 			return reminder.ErrLeaseLost
 		}
-		delivery = reminder.Delivery{ID: input.OccurrenceID, ReminderID: row.ID, Owner: reminder.Owner{TenantID: row.TenantID, UserID: row.UserID}, Content: row.Content, DeliveryKey: input.OccurrenceID, Status: reminder.DeliveryPending, AvailableAt: input.OccurredAt.UTC()}
-		if err := tx.Create(deliveryToRow(delivery, input.OccurrenceID, input.OccurredAt.UTC())).Error; err != nil {
+		delivery = reminder.Delivery{ID: input.OccurrenceID, ReminderID: row.ID, Owner: reminder.Owner{TenantID: row.TenantID, UserID: row.UserID}, Content: row.Content, DeliveryKey: input.OccurrenceID, Status: reminder.DeliveryPending, AvailableAt: dbNow}
+		if err := tx.Create(deliveryToRow(delivery, input.OccurrenceID, dbNow)).Error; err != nil {
 			return mapReminderWriteError(err)
 		}
-		if err := insertReminderEvent(tx, delivery.Owner, row.ID, "triggered", stringPtr(row.Status), reminder.StatusProcessing, "system", "due", "occurrence:"+input.OccurrenceID, row.ContentHash, input.OccurredAt.UTC()); err != nil {
+		if err := insertReminderEvent(tx, delivery.Owner, row.ID, "triggered", stringPtr(row.Status), reminder.StatusProcessing, "system", "due", "occurrence:"+input.OccurrenceID, row.ContentHash, dbNow); err != nil {
 			return err
 		}
 		return nil
 	})
 	return
+}
+
+func databaseUTCNow(tx *gorm.DB) (time.Time, error) {
+	var now time.Time
+	if err := tx.Raw("SELECT UTC_TIMESTAMP(6)").Scan(&now).Error; err != nil {
+		return time.Time{}, err
+	}
+	if now.IsZero() {
+		return time.Time{}, errors.New("database returned zero current time")
+	}
+	return now.UTC(), nil
 }
 
 func (s *Store) ClaimDeliveries(ctx context.Context, limit int, now time.Time, lease time.Duration, token string) (out []reminder.Delivery, err error) {

@@ -20,7 +20,7 @@ func (s RunnerSummarizer) Summarize(ctx context.Context, messages []agent.Messag
 	input = append(input, agent.Message{Role: "user", Content: "请仅把本次对话整理成一份可独立阅读的摘要。第一行输出简短标题，后续输出正文；不要声称已经保存。"})
 	var content strings.Builder
 	completed := false
-	for event := range s.Runner.StreamMessages(ctx, input) {
+	for event := range s.Runner.StreamConversation(ctx, agent.ConversationRequest{Messages: input}) {
 		switch event.Type {
 		case agent.EventTextDelta:
 			content.WriteString(event.Delta)

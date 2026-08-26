@@ -87,15 +87,12 @@ func TestFacadeSelectsExactlyOneHandlerForEveryDecision(t *testing.T) {
 	}
 }
 
-func TestComplexHandlerRequiresBudgets(t *testing.T) {
+func TestComplexHandlerRequiresRunnerAndTimeout(t *testing.T) {
 	runner := conversationRunnerAdapter{handler: &fakeStreamingHandler{}}
-	if _, err := NewComplexHandler(runner, time.Second, 0); err == nil {
-		t.Fatal("expected invalid step budget error")
-	}
-	if _, err := NewComplexHandler(runner, 0, 3); err == nil {
+	if _, err := NewComplexHandler(runner, 0); err == nil {
 		t.Fatal("expected invalid timeout error")
 	}
-	if _, err := NewComplexHandler(runner, time.Second, 3); err != nil {
+	if _, err := NewComplexHandler(runner, time.Second); err != nil {
 		t.Fatalf("NewComplexHandler() error = %v", err)
 	}
 }
@@ -113,7 +110,7 @@ func TestConversationHandlerPassesBoundedMessages(t *testing.T) {
 
 type closingConversationRunner struct{}
 
-func (closingConversationRunner) StreamMessages(context.Context, []agent.Message) <-chan agent.Event {
+func (closingConversationRunner) StreamConversation(context.Context, agent.ConversationRequest) <-chan agent.Event {
 	out := make(chan agent.Event)
 	close(out)
 	return out
@@ -136,8 +133,8 @@ func TestConversationHandlerSynthesizesFailureWhenSourceHasNoTerminalEvent(t *te
 
 type conversationRunnerAdapter struct{ handler *fakeStreamingHandler }
 
-func (a conversationRunnerAdapter) StreamMessages(ctx context.Context, messages []agent.Message) <-chan agent.Event {
-	return a.handler.Stream(ctx, Input{Messages: messages})
+func (a conversationRunnerAdapter) StreamConversation(ctx context.Context, request agent.ConversationRequest) <-chan agent.Event {
+	return a.handler.Stream(ctx, Input{Messages: request.Messages})
 }
 
 func TestFacadeRejectsMissingHandler(t *testing.T) {

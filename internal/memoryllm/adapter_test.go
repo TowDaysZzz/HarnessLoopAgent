@@ -16,7 +16,8 @@ type runnerFake struct {
 	failed    error
 }
 
-func (f *runnerFake) StreamMessages(_ context.Context, messages []agent.Message) <-chan agent.Event {
+func (f *runnerFake) StreamConversation(_ context.Context, request agent.ConversationRequest) <-chan agent.Event {
+	messages := request.Messages
 	f.messages = append(f.messages, append([]agent.Message(nil), messages...))
 	out := make(chan agent.Event, 2)
 	if f.failed != nil {

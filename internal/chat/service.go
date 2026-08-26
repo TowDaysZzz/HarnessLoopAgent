@@ -2,7 +2,6 @@ package chat
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -13,64 +12,43 @@ import (
 
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/agent"
 	agentauth "github.com/TowDaysZzz/HarnessLoopAgent/internal/auth"
-	"github.com/TowDaysZzz/HarnessLoopAgent/internal/contextmanager"
 	"github.com/TowDaysZzz/HarnessLoopAgent/internal/ragclient"
-	"github.com/TowDaysZzz/HarnessLoopAgent/internal/routing"
 	agentruntime "github.com/TowDaysZzz/HarnessLoopAgent/internal/runtime"
-	"github.com/TowDaysZzz/HarnessLoopAgent/internal/skill"
 )
 
-type IntentRouter interface {
-	Route(context.Context, routing.RouteInput) routing.RouteDecision
-}
-
-type IntentExecutor interface {
-	Execute(context.Context, routing.Input) (routing.Execution, error)
-}
-
 type ServiceOptions struct {
-	MessageHistoryLimit         int
-	DefaultModel                string
-	EnableIntentRouting         bool
-	EnableLegacyRoutingFallback bool
-	Router                      IntentRouter
-	Executor                    IntentExecutor
-	SkillInvocations            skill.InvocationRepository
+	MessageHistoryLimit int
+	DefaultModel        string
+	RetrievalDecider    RetrievalDecider
 }
 
 type Service struct {
-	root             context.Context
-	repo             Repository
-	runner           agent.ConversationRunner
-	assembler        contextmanager.Assembler
-	router           IntentRouter
-	executor         IntentExecutor
-	skillInvocations skill.InvocationRepository
-	notifier         *Notifier
-	options          ServiceOptions
+	root      context.Context
+	repo      Repository
+	runner    agent.ConversationRunner
+	assembler Assembler
+	decider   RetrievalDecider
+	notifier  *Notifier
+	options   ServiceOptions
 
 	mu      sync.Mutex
 	cancels map[string]context.CancelFunc
 }
 
-func NewService(root context.Context, repo Repository, runner agent.ConversationRunner, assembler contextmanager.Assembler, options ServiceOptions) (*Service, error) {
+func NewService(root context.Context, repo Repository, runner agent.ConversationRunner, assembler Assembler, options ServiceOptions) (*Service, error) {
 	if repo == nil || runner == nil || assembler == nil {
 		return nil, errors.New("chat service requires repository, runner, and context assembler")
 	}
 	if options.MessageHistoryLimit < 1 {
 		options.MessageHistoryLimit = 100
 	}
+	if options.RetrievalDecider == nil {
+		options.RetrievalDecider = RuleRetrievalDecider{}
+	}
 	service := &Service{
 		root: root, repo: repo, runner: runner, assembler: assembler,
-		router: options.Router, executor: options.Executor,
-		skillInvocations: options.SkillInvocations,
-		notifier:         NewNotifier(), options: options, cancels: make(map[string]context.CancelFunc),
-	}
-	if service.skillInvocations == nil {
-		service.skillInvocations, _ = repo.(skill.InvocationRepository)
-	}
-	if options.EnableIntentRouting && (service.router == nil || service.executor == nil) {
-		return nil, errors.New("intent routing requires router and executor")
+		decider: options.RetrievalDecider, notifier: NewNotifier(), options: options,
+		cancels: make(map[string]context.CancelFunc),
 	}
 	if err := repo.InterruptRunning(root); err != nil {
 		return nil, fmt.Errorf("recover interrupted runs: %w", err)
@@ -187,6 +165,7 @@ func (s *Service) CancelRun(ctx context.Context, runID string) (Run, error) {
 	return run, nil
 }
 
+// 聊天编排
 func (s *Service) execute(runID string, owner Owner, userAccessToken string, knowledgeBaseIDs []uint64) {
 	ctx, cancel := context.WithCancel(s.root)
 	ctx = agentruntime.WithRunID(ctx, runID)
@@ -243,78 +222,24 @@ func (s *Service) execute(runID string, owner Owner, userAccessToken string, kno
 		}
 	}
 
-	var stream <-chan agent.Event
-	var invocation *skill.Invocation
-	handlerName := "legacy"
-	decision := routing.RouteDecision{Target: routing.TargetBuiltin, Intent: routing.IntentChat, Complexity: routing.ComplexitySimple, NeedsModel: true, Confidence: 1, Reason: "legacy_routing_disabled"}
-	if s.options.EnableIntentRouting {
-		lastUserInput := ""
-		for index := len(contextResult.Messages) - 1; index >= 0; index-- {
-			if contextResult.Messages[index].Role == "user" {
-				lastUserInput = contextResult.Messages[index].Content
-				break
-			}
-		}
-		decision = s.router.Route(ctx, routing.RouteInput{
-			UserID: owner.UserID, TenantID: owner.TenantID, SessionID: run.SessionID, Content: lastUserInput,
-		})
-		if decision.IsSkill() {
-			if s.skillInvocations == nil {
-				s.fail(runID, RunFailed, "skill_invocation_store_unavailable", skill.ErrUnavailable)
-				return
-			}
-			createdInvocation, createErr := skill.NewInvocation(uuid.NewString(), skill.Owner{TenantID: owner.TenantID, UserID: owner.UserID}, run.SessionID, runID, skill.Ref{ID: decision.Skill.ID, Version: decision.Skill.Version}, decision.Skill.Arguments, time.Now().UTC())
-			if createErr != nil || createdInvocation.ArgumentsHash != decision.Skill.ArgumentsHash {
-				if createErr == nil {
-					createErr = skill.ErrInvalidInvocation
-				}
-				s.fail(runID, RunFailed, "invalid_skill_invocation", createErr)
-				return
-			}
-			stored, _, createErr := s.skillInvocations.CreateInvocation(ctx, createdInvocation)
-			if createErr != nil {
-				s.fail(runID, RunFailed, "persist_skill_invocation_failed", createErr)
-				return
-			}
-			stored, createErr = s.skillInvocations.TransitionInvocation(ctx, stored.Owner, stored.ID, skill.InvocationPending, skill.InvocationRunning, "", time.Now().UTC())
-			if createErr != nil {
-				s.fail(runID, RunFailed, "start_skill_invocation_failed", createErr)
-				return
-			}
-			invocation = &stored
-		}
-		if _, err := s.append(runID, "route.decided", routeEventMap(decision)); err != nil {
-			s.fail(runID, RunFailed, "persist_event_failed", err)
-			return
-		}
-		execution, executeErr := s.executor.Execute(ctx, routing.Input{
-			Run: routing.RunContext{
-				RunID: runID, SessionID: run.SessionID, UserID: owner.UserID, TenantID: owner.TenantID,
-				AccessToken: userAccessToken, KnowledgeBaseIDs: append([]uint64(nil), knowledgeBaseIDs...), Decision: decision, SkillInvocation: invocation,
-			},
-			Content: lastUserInput, Messages: contextResult.Messages,
-		})
-		if executeErr != nil {
-			s.finishSkillInvocation(invocation, skill.InvocationFailed, "executor_unavailable")
-			if !s.canLegacyFallback(decision) {
-				s.fail(runID, RunFailed, "executor_unavailable", executeErr)
-				return
-			}
-			stream = s.runner.StreamMessages(ctx, contextResult.Messages)
-		} else {
-			handlerName, stream = execution.Handler, execution.Events
-		}
-	} else {
-		stream = s.runner.StreamMessages(ctx, contextResult.Messages)
+	decision := s.decider.Decide(contextResult.Messages)
+	if !decision.Reason.Valid() || decision.Required == (decision.Reason == RetrievalReasonNotRequired) {
+		s.fail(runID, RunFailed, "invalid_retrieval_decision", errors.New("retrieval decider returned an invalid decision"))
+		return
 	}
-	executorStartedAt := time.Now()
-	if _, err := s.append(runID, "executor.started", executorEventMap(decision, handlerName, "started", "", 0)); err != nil {
+	if _, err := s.append(runID, "retrieval.decided", map[string]any{
+		"required": decision.Required,
+		"reason":   string(decision.Reason),
+	}); err != nil {
 		s.fail(runID, RunFailed, "persist_event_failed", err)
 		return
 	}
+	stream := s.runner.StreamConversation(ctx, agent.ConversationRequest{
+		Messages:             contextResult.Messages,
+		RequireNoteRetrieval: decision.Required,
+	})
 
 	var answer strings.Builder
-	skillSuspended := false
 	for event := range stream {
 		switch event.Type {
 		case agent.EventTextDelta:
@@ -334,62 +259,18 @@ func (s *Service) execute(runID string, owner Owner, userAccessToken string, kno
 				s.fail(runID, RunFailed, "persist_event_failed", err)
 				return
 			}
-		case agent.EventDraftCandidate, agent.EventWorkflowCandidate:
-			data := map[string]any{}
-			if err := json.Unmarshal([]byte(event.Delta), &data); err != nil {
-				s.fail(runID, RunFailed, "invalid_candidate_event", err)
-				return
-			}
-			if _, err := s.append(runID, string(event.Type), data); err != nil {
-				s.fail(runID, RunFailed, "persist_event_failed", err)
-				return
-			}
-		case skill.EventStarted:
-			if _, err := s.append(runID, string(event.Type), map[string]any{"skill_id": event.Delta}); err != nil {
-				s.fail(runID, RunFailed, "persist_event_failed", err)
-				return
-			}
-		case skill.EventCache:
-			if _, err := s.append(runID, string(event.Type), map[string]any{"status": event.Delta}); err != nil {
-				s.fail(runID, RunFailed, "persist_event_failed", err)
-				return
-			}
-		case skill.EventStep:
-			if _, err := s.append(runID, string(event.Type), map[string]any{"step": event.Delta}); err != nil {
-				s.fail(runID, RunFailed, "persist_event_failed", err)
-				return
-			}
-		case skill.EventCandidate:
-			data := map[string]any{}
-			if err := json.Unmarshal([]byte(event.Delta), &data); err != nil {
-				s.finishSkillInvocation(invocation, skill.InvocationFailed, "invalid_candidate_event")
-				s.fail(runID, RunFailed, "invalid_candidate_event", err)
-				return
-			}
-			skillSuspended = event.Status == "suspended"
-			if _, err := s.append(runID, string(event.Type), data); err != nil {
-				s.fail(runID, RunFailed, "persist_event_failed", err)
-				return
-			}
 		case agent.EventRunFailed:
 			status := RunFailed
 			code := "agent_failed"
 			if errors.Is(event.Err, context.Canceled) {
-				s.finishSkillInvocation(invocation, skill.InvocationCancelled, "cancelled")
 				return
 			}
 			if errors.Is(event.Err, context.DeadlineExceeded) {
 				status, code = RunTimedOut, "run_timeout"
 			}
-			_, _ = s.append(runID, "executor.failed", executorEventMap(decision, handlerName, "failed", code, time.Since(executorStartedAt)))
-			s.finishSkillInvocation(invocation, skill.InvocationFailed, code)
 			s.fail(runID, status, code, event.Err)
 			return
 		case agent.EventRunCompleted:
-			if _, err := s.append(runID, "executor.completed", executorEventMap(decision, handlerName, "completed", "", time.Since(executorStartedAt))); err != nil {
-				s.fail(runID, RunFailed, "persist_event_failed", err)
-				return
-			}
 			now := time.Now().UTC()
 			assistant := Message{
 				ID: uuid.NewString(), SessionID: run.SessionID, RunID: runID,
@@ -397,70 +278,21 @@ func (s *Service) execute(runID string, owner Owner, userAccessToken string, kno
 			}
 			completed := Event{RunID: runID, Type: string(event.Type), Data: map[string]any{"status": RunCompleted}, CreatedAt: now}
 			if err := s.repo.CompleteRun(ctx, runID, assistant, completed); err != nil {
-				s.finishSkillInvocation(invocation, skill.InvocationFailed, "complete_run_failed")
 				s.fail(runID, RunFailed, "complete_run_failed", err)
 				return
-			}
-			if skillSuspended {
-				s.finishSkillInvocation(invocation, skill.InvocationSuspended, "")
-			} else {
-				s.finishSkillInvocation(invocation, skill.InvocationCompleted, "")
 			}
 			s.notifier.Notify(runID)
 			return
 		}
 	}
 	if errors.Is(ctx.Err(), context.Canceled) {
-		s.finishSkillInvocation(invocation, skill.InvocationCancelled, "cancelled")
 		return
 	}
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		_, _ = s.append(runID, "executor.failed", executorEventMap(decision, handlerName, "failed", "run_timeout", time.Since(executorStartedAt)))
 		s.fail(runID, RunTimedOut, "run_timeout", ctx.Err())
-		s.finishSkillInvocation(invocation, skill.InvocationFailed, "run_timeout")
 		return
 	}
-	_, _ = s.append(runID, "executor.failed", executorEventMap(decision, handlerName, "failed", "stream_closed", time.Since(executorStartedAt)))
 	s.fail(runID, RunFailed, "stream_closed", errors.New("agent stream closed without terminal event"))
-	s.finishSkillInvocation(invocation, skill.InvocationFailed, "stream_closed")
-}
-
-func (s *Service) finishSkillInvocation(invocation *skill.Invocation, target skill.InvocationStatus, code string) {
-	if invocation == nil || s.skillInvocations == nil || invocation.Status != skill.InvocationRunning {
-		return
-	}
-	updated, err := s.skillInvocations.TransitionInvocation(s.root, invocation.Owner, invocation.ID, skill.InvocationRunning, target, code, time.Now().UTC())
-	if err == nil {
-		*invocation = updated
-	}
-}
-
-func (s *Service) canLegacyFallback(decision routing.RouteDecision) bool {
-	if !s.options.EnableLegacyRoutingFallback {
-		return false
-	}
-	return decision.Intent == routing.IntentChat || decision.Intent == routing.IntentNoteQuery
-}
-
-func routeEventMap(decision routing.RouteDecision) map[string]any {
-	value := routing.NewRouteEventData(decision)
-	data := map[string]any{
-		"intent": value.Intent, "complexity": value.Complexity, "confidence": value.Confidence,
-		"reason": value.Reason, "deterministic": value.Deterministic, "needs_rag": value.NeedsRAG, "needs_model": value.NeedsModel,
-	}
-	data["target"] = decision.Target
-	if decision.Skill != nil {
-		data["skill_id"], data["skill_version"], data["arguments_hash"] = decision.Skill.ID, decision.Skill.Version, decision.Skill.ArgumentsHash
-	}
-	return data
-}
-
-func executorEventMap(decision routing.RouteDecision, handler, status, errorCode string, duration time.Duration) map[string]any {
-	value := routing.NewExecutorEventData(decision, handler, status, errorCode, duration)
-	return map[string]any{
-		"intent": value.Intent, "complexity": value.Complexity, "handler": value.Handler,
-		"status": value.Status, "error_code": value.ErrorCode, "duration_ms": value.DurationMS,
-	}
 }
 
 func ownerFromContext(ctx context.Context) Owner {

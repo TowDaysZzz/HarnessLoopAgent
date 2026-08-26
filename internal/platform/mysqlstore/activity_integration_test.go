@@ -21,7 +21,7 @@ type mysqlReviewRunner struct {
 	calls  int
 }
 
-func (r *mysqlReviewRunner) StreamMessages(_ context.Context, _ []agent.Message) <-chan agent.Event {
+func (r *mysqlReviewRunner) StreamConversation(_ context.Context, _ agent.ConversationRequest) <-chan agent.Event {
 	r.calls++
 	out := make(chan agent.Event, 2)
 	out <- agent.Event{Type: agent.EventTextDelta, Delta: r.output}

@@ -1,0 +1,77 @@
+<style>
+  .palette { display:flex; gap:10px; margin:18px 0 26px; flex-wrap:wrap; }
+  .swatch { display:flex; align-items:center; gap:9px; padding:8px 12px; border:1px solid #e5e5e7; border-radius:999px; background:white; font-size:12px; color:#1c1c1e; }
+  .dot { width:18px; height:18px; border-radius:50%; box-shadow:inset 0 0 0 1px rgba(0,0,0,.06); }
+  .direction-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:18px; }
+  .direction { cursor:pointer; border:2px solid transparent; border-radius:22px; padding:10px; transition:.18s ease; background:#f2f2f7; }
+  .direction:hover { transform:translateY(-2px); }
+  .direction.selected { border-color:#2e8b57; box-shadow:0 0 0 4px rgba(46,139,87,.12); }
+  .phone { min-height:390px; overflow:hidden; border:1px solid rgba(0,0,0,.08); border-radius:17px; background:#fffafa; color:#1c1c1e; font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif; }
+  .bar { height:44px; display:flex; align-items:center; justify-content:space-between; padding:0 14px; border-bottom:1px solid rgba(60,60,67,.12); }
+  .brand { font-size:15px; font-weight:700; }
+  .avatar { width:24px; height:24px; border-radius:50%; background:#2e8b57; }
+  .screen { padding:18px 16px 14px; }
+  .eyebrow { color:#2e8b57; font-size:10px; font-weight:700; }
+  .screen h3 { margin:5px 0 5px; font-size:22px; line-height:1.2; letter-spacing:-.03em; color:#1c1c1e; }
+  .screen p { margin:0; color:#636366; font-size:11px; line-height:1.5; }
+  .link { color:#027afe !important; font-weight:600; }
+  .capture { margin-top:18px; padding:14px; border-radius:14px; background:#fff; border:1px solid rgba(60,60,67,.12); }
+  .input-line { height:8px; width:72%; margin-bottom:10px; border-radius:4px; background:#d1d1d6; }
+  .input-line.short { width:46%; background:#e5e5ea; }
+  .primary { display:inline-flex; align-items:center; justify-content:center; min-height:34px; margin-top:14px; padding:0 14px; border-radius:10px; color:white; background:#2e8b57; font-size:11px; font-weight:650; }
+  .note { margin-top:10px; padding:13px 14px; border-radius:14px; background:#fff; border:1px solid rgba(60,60,67,.10); }
+  .note b { display:block; margin-bottom:5px; font-size:12px; }
+  .note small { color:#8e8e93; font-size:9px; }
+  .tabs { display:flex; justify-content:space-around; margin-top:15px; padding:10px 4px 2px; border-top:1px solid rgba(60,60,67,.12); color:#8e8e93; font-size:9px; }
+  .tabs span:first-child { color:#2e8b57; font-weight:700; }
+  .soft .bar { background:rgba(255,255,255,.72); backdrop-filter:blur(18px); }
+  .soft .capture,.soft .note { box-shadow:0 8px 28px rgba(28,28,30,.05); border-color:transparent; }
+  .pure .phone { background:#fff; }
+  .pure .screen { padding-top:22px; }
+  .pure .capture,.pure .note { border-radius:10px; box-shadow:none; }
+  .pure .tabs { background:#fff; }
+  .mori .phone { background:#fffafa; }
+  .mori .bar { background:#2e8b57; color:white; border:0; }
+  .mori .avatar { background:#fffafa; }
+  .mori .capture { background:#f2f7f4; border-color:rgba(46,139,87,.2); }
+  .choice-copy { padding:13px 5px 4px; }
+  .choice-copy h3 { margin:0 0 5px; font-size:15px; color:#1c1c1e; }
+  .choice-copy p { margin:0; color:#6e6e73; font-size:11px; line-height:1.5; }
+  @media(max-width:900px){.direction-grid{grid-template-columns:1fr}.phone{min-height:350px}}
+</style>
+
+<h2>哪一种 iOS 气质更适合 Mori？</h2>
+<p class="subtitle">三种方案都使用绿色主操作、雪色背景、黑色正文与蓝色链接。点击卡片选择。</p>
+
+<div class="palette">
+  <div class="swatch"><span class="dot" style="background:#2e8b57"></span>主高亮 #2E8B57</div>
+  <div class="swatch"><span class="dot" style="background:#fffafa"></span>主背景 #FFFAFA</div>
+  <div class="swatch"><span class="dot" style="background:#1c1c1e"></span>默认文字 #1C1C1E</div>
+  <div class="swatch"><span class="dot" style="background:#027afe"></span>链接强调 #027AFE</div>
+</div>
+
+<div class="direction-grid">
+  <div class="direction soft" data-choice="soft-ios" onclick="toggleSelect(this)">
+    <div class="phone">
+      <div class="bar"><span class="brand">mori</span><span class="avatar"></span></div>
+      <div class="screen"><span class="eyebrow">今天</span><h3>记下此刻的想法</h3><p>让每一条笔记在未来与你重逢。</p><div class="capture"><div class="input-line"></div><div class="input-line short"></div><span class="primary">保存笔记</span></div><div class="note"><b>让知识真正流动起来</b><p>记录只是起点，连接与行动才是终点。</p><p class="link">查看关联笔记 →</p></div><div class="tabs"><span>笔记</span><span>对话</span><span>收集箱</span></div></div>
+    </div>
+    <div class="choice-copy"><h3>A · 柔和 iOS（推荐）</h3><p>雪色底、白色浮层、轻微材质感；兼顾 iOS 与 Mori 的温度。</p></div>
+  </div>
+
+  <div class="direction pure" data-choice="pure-ios" onclick="toggleSelect(this)">
+    <div class="phone">
+      <div class="bar"><span class="brand">mori</span><span class="avatar"></span></div>
+      <div class="screen"><span class="eyebrow">今天</span><h3>记下此刻的想法</h3><p>让每一条笔记在未来与你重逢。</p><div class="capture"><div class="input-line"></div><div class="input-line short"></div><span class="primary">保存笔记</span></div><div class="note"><b>让知识真正流动起来</b><p>记录只是起点，连接与行动才是终点。</p><p class="link">查看关联笔记 →</p></div><div class="tabs"><span>笔记</span><span>对话</span><span>收集箱</span></div></div>
+    </div>
+    <div class="choice-copy"><h3>B · 纯净系统风</h3><p>接近原生 iOS 设置与备忘录，边界清晰，视觉最克制。</p></div>
+  </div>
+
+  <div class="direction mori" data-choice="brand-ios" onclick="toggleSelect(this)">
+    <div class="phone">
+      <div class="bar"><span class="brand">mori</span><span class="avatar"></span></div>
+      <div class="screen"><span class="eyebrow">今天</span><h3>记下此刻的想法</h3><p>让每一条笔记在未来与你重逢。</p><div class="capture"><div class="input-line"></div><div class="input-line short"></div><span class="primary">保存笔记</span></div><div class="note"><b>让知识真正流动起来</b><p>记录只是起点，连接与行动才是终点。</p><p class="link">查看关联笔记 →</p></div><div class="tabs"><span>笔记</span><span>对话</span><span>收集箱</span></div></div>
+    </div>
+    <div class="choice-copy"><h3>C · 品牌强化风</h3><p>绿色顶栏与浅绿输入区更醒目，品牌感最强，但不如前两种极简。</p></div>
+  </div>
+</div>

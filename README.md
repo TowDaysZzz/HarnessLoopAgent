@@ -63,7 +63,7 @@ NOTE:
 
 Reminder 的 API、功能矩阵、投递保证及灰度/回滚步骤见 [Reminder API](docs/api/agent-reminder-api.md)。
 
-每日回顾以默认关闭的只读 Workflow Skill 接入同一 Chat Run/SSE 链路。用户可直接发送“回顾今天”“复盘昨天”或带明确日期的表达；当天跨会话消息、笔记和相关 Memory 没有变化时，重复触发会返回已验证缓存。配置、事件、新鲜度及回滚说明见 [Daily Review Skill](docs/api/daily-review-skill.md)。普通聊天以及 Note、Memory、Reminder 内建意图不必进入 Workflow，关闭 `SKILLS.ENABLED` 即恢复原有路由行为。
+Chat 的生产主链路只负责普通多轮对话和笔记 RAG，不再分发 Note 写入、Memory、Reminder、Daily Review 或其他 Workflow/Skill。相关实现与存储暂时保留，供独立控制面和第二阶段迁移使用；在聊天中输入“回顾今天”“记住……”或“提醒我……”只会作为普通文本交给模型，不会产生业务写入副作用。历史 Daily Review 设计见 [Daily Review Skill](docs/api/daily-review-skill.md)，但它当前不再由 Chat 自然语言触发。
 
 创建会话和 Run：
 
@@ -86,6 +86,8 @@ curl -N http://127.0.0.1:8080/v1/runs/<run_id>/events -H 'Last-Event-ID: 12'
 ```
 
 客户端断开 SSE 不会取消后台 Run；需要显式调用 `POST /v1/runs/{run_id}/cancel`。同一会话只允许一个活跃 Run，重复 `Idempotency-Key` 返回原 Run。历史笔记问题继续采用验证后输出，未通过 Grounding 校验的模型草稿不会进入 SSE。
+
+当前事件主干为 `run.queued -> run.started -> retrieval.decided -> run.status/tool.completed/text.delta -> run.completed`；`context.truncated` 只在上下文被裁剪时出现。`retrieval.decided` 只记录布尔结果和 allow-listed reason：明确笔记问题及其省略式追问会在当前 Run 重新检索，普通聊天不强制检索，但模型仍可自主调用只读的 `semantic_search_notes`。
 
 当前上下文管理使用 Token 预算下的最近消息窗口，接口已允许后续替换为参考 harness9 的 Progressive Compactor。原始消息始终保存在 MySQL，不会被摘要覆盖或删除。
 
@@ -117,7 +119,7 @@ MEMORY:
   PROJECTION_ENABLED: false
 ```
 
-Pilot 只识别认证用户显式表达的“记住”或“修改偏好”，并启动与 Chat Run 解耦的耐久 Capture；普通聊天、Tool 结果和节点完成事件不会写入长期 Memory。每次长期写入先进入 Review，用户可批准、拒绝或编辑。控制面详见 `docs/api/agent-memory-api.md`。
+Memory Capture 通过独立控制面启动，不再从 Chat 自然语言自动识别“记住”或“修改偏好”。普通聊天、Tool 结果和节点完成事件不会写入长期 Memory。每次长期写入仍先进入 Review，用户可批准、拒绝或编辑。控制面详见 `docs/api/agent-memory-api.md`。
 
 exact-only 只按固定 `MemoryRef`、`EntityRef`、`namespace + slot_key`、内容哈希或显式局部 scope 召回；没有稳定 selector 时返回空结果或澄清，不执行 owner 全量扫描。因此它不能达到向量检索的同义改写、模糊描述或跨措辞召回率。
 

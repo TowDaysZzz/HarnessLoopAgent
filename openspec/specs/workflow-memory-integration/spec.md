@@ -108,12 +108,16 @@ Workflow checkpoint SHALL 只保存业务恢复所需的 Memory 引用、结构�
 - **THEN** 系统 SHALL 使用运行时可信服务授权和 owner scope，不得从 checkpoint 恢复原始用户 Access Token
 
 ### Requirement: Memory Workflow 与 Chat Run 生命周期解耦
-长期等待 Memory 审核的 Workflow SHALL 与触发它的 Chat Run 和 SSE 生命周期保持解耦，不得占用聊天会话 active guard。
+长期等待审核的 Memory Workflow SHALL 仅通过独立认证控制面启动和恢复，并与 Chat Run、SSE、会话 active guard 及进程内 Chat 状态保持解耦。Chat Runtime MUST 不根据自然语言创建 Memory Capture Workflow、候选或 Wait。
 
 #### Scenario: Chat Run 产生待审核 Memory
-- **WHEN** Chat Run 启动业务 Workflow 且 Workflow 因 Memory Review 进入 suspended
-- **THEN** Chat Run MAY 正常完成，后续认证请求 SHALL 能恢复原 Workflow Run
+- **WHEN** 用户在 Chat 中表达“记住”或长期偏好
+- **THEN** Chat Runtime 不启动 Memory Capture Workflow、不创建候选，也不产生 Memory 副作用
+
+#### Scenario: 通过独立控制面启动 Memory Capture
+- **WHEN** 当前 owner 通过认证的 Memory 控制面提交合法 Capture 请求
+- **THEN** 系统启动独立 Workflow Run，且该 Workflow 的运行或暂停不占用任何聊天会话 active guard
 
 #### Scenario: 服务重启后恢复审核
 - **WHEN** 服务重启且 Memory Workflow 存在耐久 Wait
-- **THEN** 系统 SHALL 从已提交 checkpoint 与 Wait 恢复同一 Workflow Run，不依赖原 Chat 连接或进程内状态
+- **THEN** 系统从已提交 checkpoint 与 Wait 恢复同一 Workflow Run，不依赖原 Chat 连接或进程内状态

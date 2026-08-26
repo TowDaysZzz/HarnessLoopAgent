@@ -10,7 +10,8 @@ import (
 
 type summarizerRunnerFake struct{ messages []agent.Message }
 
-func (f *summarizerRunnerFake) StreamMessages(_ context.Context, messages []agent.Message) <-chan agent.Event {
+func (f *summarizerRunnerFake) StreamConversation(_ context.Context, request agent.ConversationRequest) <-chan agent.Event {
+	messages := request.Messages
 	f.messages = append([]agent.Message(nil), messages...)
 	out := make(chan agent.Event, 2)
 	out <- agent.Event{Type: agent.EventTextDelta, Delta: "Go GC\nGo GC 使用并发标记。"}

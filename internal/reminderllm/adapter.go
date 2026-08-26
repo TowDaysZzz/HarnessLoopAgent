@@ -75,7 +75,7 @@ func (a *Adapter) complete(ctx context.Context, messages []agent.Message) ([]byt
 	defer cancel()
 	var output strings.Builder
 	completed := false
-	for event := range a.runner.StreamMessages(callCtx, messages) {
+	for event := range a.runner.StreamConversation(callCtx, agent.ConversationRequest{Messages: messages}) {
 		switch event.Type {
 		case agent.EventTextDelta:
 			if output.Len()+len(event.Delta) > a.config.MaxResponseBytes {

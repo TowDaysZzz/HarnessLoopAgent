@@ -24,3 +24,6 @@ web/test-results/
 
 # 操作系统临时文件
 .DS_Store
+
+# 笔记文件
+openspec/
